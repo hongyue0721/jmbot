@@ -310,13 +310,17 @@ func Main() {
 
 func NewApp(configPath, configExamplePath string) (*App, error) {
 	if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) {
-		raw, readErr := os.ReadFile(configExamplePath)
-		if readErr != nil {
-			return nil, fmt.Errorf("missing config.yml and unreadable config.example.yml: %w", readErr)
+		if writeErr := writeMinimalConfigTemplate(configPath); writeErr != nil {
+			// Fallback: if minimal template creation fails, try copying example.
+			raw, readErr := os.ReadFile(configExamplePath)
+			if readErr != nil {
+				return nil, fmt.Errorf("missing config.yml and failed to create minimal template: %w", writeErr)
+			}
+			if writeErr2 := os.WriteFile(configPath, raw, 0o644); writeErr2 != nil {
+				return nil, fmt.Errorf("write config.yml failed: %w", writeErr2)
+			}
 		}
-		if writeErr := os.WriteFile(configPath, raw, 0o644); writeErr != nil {
-			return nil, writeErr
-		}
+		return nil, fmt.Errorf("首次启动：已生成最小配置文件 `%s`，请先填写 admin_id / websocket_url / websocket_token 后重新启动", configPath)
 	}
 
 	raw, err := os.ReadFile(configPath)
@@ -342,6 +346,40 @@ func NewApp(configPath, configExamplePath string) (*App, error) {
 	}
 	app.jm.SetCBZOptions(cfg.CBZChapterEnabled, cfg.CBZSeriesEnabled)
 	return app, nil
+}
+
+func writeMinimalConfigTemplate(configPath string) error {
+	const tpl = `# 首次启动自动生成的最小配置，请至少填写以下三项：
+# 1) admin_id（可留空为0，随后首个私聊发送 /jm admin 自动认领）
+# 2) websocket_url
+# 3) websocket_token
+
+admin_id: 0
+http_host: "0.0.0.0"
+http_port: 8071
+
+# NapCat OneBot WebSocket 地址与鉴权
+websocket_url: "ws://127.0.0.1:13001"
+websocket_token: ""
+
+# 基础目录
+file_dir: "./pdf/"
+manga_dir: "./manga/"
+cbz_dir: "./cbz/"
+log_dir: "./logs"
+
+# jmcomic 选项文件
+jm_option_path: "./configs/option.yml"
+
+# 传输模式：建议容器内/同机先用 local，跨机用 scp
+transfer_mode: "local"
+remote_user: ""
+remote_host: ""
+remote_temp_dir: "/tmp/napcat-jm-go-${USER}/temp"
+local_ssh_key: ""
+docker_internal_path: "/app/.config/QQ/temp/"
+`
+	return os.WriteFile(configPath, []byte(tpl), 0o644)
 }
 
 func fillDefaults(cfg *Config) {
@@ -374,8 +412,12 @@ func fillDefaults(cfg *Config) {
 		}
 	}
 	if cfg.TransferMode == "" {
-		cfg.TransferMode = "scp"
+		cfg.TransferMode = "local"
 	}
+	if strings.TrimSpace(cfg.RemoteTempDir) == "" {
+		cfg.RemoteTempDir = "/tmp/napcat-jm-go-${USER}/temp"
+	}
+	cfg.RemoteTempDir = expandUserVars(cfg.RemoteTempDir)
 	if cfg.DownloadTimeout == 0 {
 		cfg.DownloadTimeout = 1800
 	}
@@ -932,9 +974,15 @@ func (a *App) handleMessageEvent(data map[string]any) {
 	if rawMessage == "" {
 		return
 	}
+	if a.handleAdminClaimCommand(rawMessage, messageType, groupID, userID) {
+		return
+	}
 
 	if matched(`^/jm\s+help$`, rawMessage) {
 		a.sendMessage(messageType, groupID, userID, helpMessage())
+		return
+	}
+	if a.handleCfgCommand(rawMessage, messageType, groupID, userID) {
 		return
 	}
 	if m := mustMatch(`^/jm\s+mode\s+(pdf|zip)$`, rawMessage); m != nil {
@@ -1171,6 +1219,200 @@ func (a *App) requireAdmin(messageType string, groupID, userID int64, deny strin
 		return false
 	}
 	return true
+}
+
+func (a *App) handleAdminClaimCommand(rawMessage, messageType string, groupID, userID int64) bool {
+	if !matched(`^/jm\s+admin$`, rawMessage) {
+		return false
+	}
+	if messageType != "private" || userID <= 0 {
+		a.sendMessage(messageType, groupID, userID, "请私聊机器人发送 /jm admin 认领管理员")
+		return true
+	}
+
+	a.cfgMu.Lock()
+	current := a.cfg.AdminID
+	if current == 0 {
+		a.cfg.AdminID = userID
+		if a.cfg.CardUserID == 0 || a.cfg.CardUserID == 10000 {
+			a.cfg.CardUserID = userID
+		}
+		a.cfgMu.Unlock()
+		a.saveConfig()
+		a.sendMessage(messageType, groupID, userID, "管理员认领成功")
+		return true
+	}
+	a.cfgMu.Unlock()
+	if current == userID {
+		a.sendMessage(messageType, groupID, userID, "你已经是管理员")
+	} else {
+		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("管理员已设置为：%d", current))
+	}
+	return true
+}
+
+func expandUserVars(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+	u := os.Getenv("USER")
+	if u == "" {
+		if cu, err := user.Current(); err == nil {
+			u = cu.Username
+		}
+	}
+	if u != "" {
+		s = strings.ReplaceAll(s, "${USER}", u)
+		s = strings.ReplaceAll(s, "$USER", u)
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		s = strings.ReplaceAll(s, "${HOME}", home)
+		s = strings.ReplaceAll(s, "$HOME", home)
+	}
+	return s
+}
+
+func (a *App) handleCfgCommand(rawMessage, messageType string, groupID, userID int64) bool {
+	if matched(`^/jm\s+cfg\s+list$`, rawMessage) {
+		if !a.requireAdmin(messageType, groupID, userID, "仅管理员可配置开关") {
+			return true
+		}
+		msg := "可配置开关：\n" +
+			"1) reply_as_card\n" +
+			"2) cbz_chapter_enabled\n" +
+			"3) cbz_series_enabled\n" +
+			"4) embedded_bypass_enabled\n" +
+			"5) http_port_fallback\n" +
+			"6) local_test_mode\n" +
+			"7) local_test_exit_after_selftest\n" +
+			"8) enc_enabled (支持global/group)\n" +
+			"9) randpwd_enabled (支持global/group)\n" +
+			"10) regex_enabled (支持global/group)\n\n" +
+			"示例：\n" +
+			"/jm cfg show reply_as_card\n" +
+			"/jm cfg set reply_as_card on\n" +
+			"/jm cfg set enc_enabled on group\n" +
+			"/jm cfg set enc_enabled off global"
+		a.sendMessage(messageType, groupID, userID, msg)
+		return true
+	}
+	if m := mustMatch(`^/jm\s+cfg\s+show\s+([a-z_]+)$`, rawMessage); m != nil {
+		if !a.requireAdmin(messageType, groupID, userID, "仅管理员可配置开关") {
+			return true
+		}
+		key := strings.ToLower(strings.TrimSpace(m[1]))
+		a.cfgMu.RLock()
+		cfg := a.cfg
+		var msg string
+		switch key {
+		case "reply_as_card":
+			msg = fmt.Sprintf("%s = %t", key, cfg.ReplyAsCard)
+		case "cbz_chapter_enabled":
+			msg = fmt.Sprintf("%s = %t", key, cfg.CBZChapterEnabled)
+		case "cbz_series_enabled":
+			msg = fmt.Sprintf("%s = %t", key, cfg.CBZSeriesEnabled)
+		case "embedded_bypass_enabled":
+			msg = fmt.Sprintf("%s = %t", key, cfg.EmbeddedBypassEnable)
+		case "http_port_fallback":
+			msg = fmt.Sprintf("%s = %t", key, cfg.HTTPPortFallback)
+		case "local_test_mode":
+			msg = fmt.Sprintf("%s = %t", key, cfg.LocalTestMode)
+		case "local_test_exit_after_selftest":
+			msg = fmt.Sprintf("%s = %t", key, cfg.LocalTestExitAfterSelftest)
+		case "enc_enabled":
+			groupVal := cfg.EncEnabledGroup[strconv.FormatInt(groupID, 10)]
+			msg = fmt.Sprintf("%s: global=%t, group(%d)=%t", key, cfg.EncEnabledGlobal, groupID, groupVal)
+		case "randpwd_enabled":
+			groupVal := cfg.RandomPasswordEnabledGroup[strconv.FormatInt(groupID, 10)]
+			msg = fmt.Sprintf("%s: global=%t, group(%d)=%t", key, cfg.RandomPasswordEnabledGlobal, groupID, groupVal)
+		case "regex_enabled":
+			groupVal := cfg.RegexEnabledGroup[strconv.FormatInt(groupID, 10)]
+			msg = fmt.Sprintf("%s: global=%t, group(%d)=%t", key, cfg.RegexEnabledGlobal, groupID, groupVal)
+		default:
+			msg = "不支持的开关，使用 /jm cfg list 查看可用项"
+		}
+		a.cfgMu.RUnlock()
+		a.sendMessage(messageType, groupID, userID, msg)
+		return true
+	}
+	if m := mustMatch(`^/jm\s+cfg\s+set\s+([a-z_]+)\s+(\S+)(?:\s+(global|group))?$`, rawMessage); m != nil {
+		if !a.requireAdmin(messageType, groupID, userID, "仅管理员可配置开关") {
+			return true
+		}
+		key := strings.ToLower(strings.TrimSpace(m[1]))
+		v, ok := parseSwitchBool(m[2])
+		if !ok {
+			a.sendMessage(messageType, groupID, userID, "值仅支持 on/off(true/false/1/0)")
+			return true
+		}
+		scope := strings.ToLower(strings.TrimSpace(m[3]))
+		if scope == "" {
+			scope = "group"
+			if messageType != "group" || groupID <= 0 {
+				scope = "global"
+			}
+		}
+
+		a.cfgMu.Lock()
+		changed := true
+		switch key {
+		case "reply_as_card":
+			a.cfg.ReplyAsCard = v
+		case "cbz_chapter_enabled":
+			a.cfg.CBZChapterEnabled = v
+		case "cbz_series_enabled":
+			a.cfg.CBZSeriesEnabled = v
+		case "embedded_bypass_enabled":
+			a.cfg.EmbeddedBypassEnable = v
+		case "http_port_fallback":
+			a.cfg.HTTPPortFallback = v
+		case "local_test_mode":
+			a.cfg.LocalTestMode = v
+		case "local_test_exit_after_selftest":
+			a.cfg.LocalTestExitAfterSelftest = v
+		case "enc_enabled":
+			if scope == "group" && messageType == "group" && groupID > 0 {
+				a.cfg.EncEnabledGroup[strconv.FormatInt(groupID, 10)] = v
+			} else {
+				a.cfg.EncEnabledGlobal = v
+			}
+		case "randpwd_enabled":
+			if scope == "group" && messageType == "group" && groupID > 0 {
+				a.cfg.RandomPasswordEnabledGroup[strconv.FormatInt(groupID, 10)] = v
+			} else {
+				a.cfg.RandomPasswordEnabledGlobal = v
+			}
+		case "regex_enabled":
+			if scope == "group" && messageType == "group" && groupID > 0 {
+				a.cfg.RegexEnabledGroup[strconv.FormatInt(groupID, 10)] = v
+			} else {
+				a.cfg.RegexEnabledGlobal = v
+			}
+		default:
+			changed = false
+		}
+		a.cfgMu.Unlock()
+		if !changed {
+			a.sendMessage(messageType, groupID, userID, "不支持的开关，使用 /jm cfg list 查看可用项")
+			return true
+		}
+		a.saveConfig()
+		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("配置已更新：%s=%t (%s)", key, v, scope))
+		return true
+	}
+	return false
+}
+
+func parseSwitchBool(raw string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "on", "true", "1", "yes":
+		return true, true
+	case "off", "false", "0", "no":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func (a *App) isJMAllowed(messageType string, groupID, userID int64) bool {
@@ -2393,7 +2635,8 @@ func helpMessage() string {
 		"9) /jm randpwd on|off：启用随机密码加密\n" +
 		"10) /jm fname jm|full：设置发送文件命名方式\n" +
 		"11) /jm regex on|off：设置正则模式\n" +
-		"12) /jm help：查看帮助"
+		"12) /jm cfg list|show|set：在线配置开关（管理员）\n" +
+		"13) /jm help：查看帮助"
 }
 
 func contains(list []string, v string) bool {
@@ -2800,6 +3043,9 @@ func stageForNapcat(cfg Config, localFile string) (string, error) {
 	if strings.ToLower(cfg.TransferMode) == "local" {
 		raw, err := os.ReadFile(localFile)
 		if err != nil {
+			return "", err
+		}
+		if err := os.MkdirAll(filepath.Dir(remote), 0o755); err != nil {
 			return "", err
 		}
 		if err := os.WriteFile(remote, raw, 0o644); err != nil {

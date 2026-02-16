@@ -54,12 +54,20 @@
 主配置文件：`config.yml`  
 示例模板：`configs/config.example.yml`
 
-首次运行若没有 `config.yml`，程序会从示例模板复制生成。
+首次运行若没有 `config.yml`，程序会自动生成“最小配置模板”并退出，提示你先填写关键项后再启动：
+- `admin_id`
+- `websocket_url`
+- `websocket_token`
+
+管理员初始化说明：
+- 若 `admin_id: 0`（未设置），可由首个私聊机器人发送 `/jm admin` 的账号自动认领管理员。
 
 关键配置项（建议优先检查）：
 - `http_host` / `http_port`：NapCat 回调监听地址
 - `http_port_fallback`：主端口是否自动退避（默认 `false`，建议保持）
 - `websocket_url` / `websocket_token`：NapCat WS 发送通道
+- `transfer_mode`：默认建议 `local`
+- `remote_temp_dir`：支持 `${USER}` 变量，如 `/tmp/napcat-jm-go-${USER}/temp`
 - `jm_option_path`：默认 `./configs/option.yml`
 - `file_dir` / `manga_dir` / `cbz_dir`
 - `soutu_*`：识图请求参数
@@ -128,7 +136,64 @@ docker compose down
 - `./cbz -> /app/cbz`
 - `./logs -> /app/logs`
 
-## 5. systemd 管理
+## 5. NapCat 配置（必须）
+
+本项目需要 NapCat 同时配置两条通道：
+- `WebSocket 服务端`：供本项目主动发送消息（本项目作为 WS 客户端连接）
+- `HTTP 客户端`：NapCat 将事件回调到本项目（本项目作为 HTTP 服务端接收）
+
+### 5.1 在 NapCat 创建 WebSocket 服务端
+
+在 NapCat 后台新增一个 OneBot WS 服务端（名字可自定义）：
+- 监听地址示例：`0.0.0.0`
+- 端口示例：`13001`
+- Access Token：例如 `1`（建议生产使用强随机字符串）
+
+然后在本项目 `config.yml` 对应填写：
+
+```yaml
+websocket_url: "ws://127.0.0.1:13001"
+websocket_token: "1"
+```
+
+说明：
+- 如果项目与 NapCat 同机，`127.0.0.1` 最稳。
+- 若跨机器部署，把 `127.0.0.1` 改成 NapCat 机器 IP。
+
+### 5.2 在 NapCat 创建 HTTP 客户端
+
+在 NapCat 后台新增一个 OneBot HTTP 客户端（上报地址）：
+- 上报 URL 示例：`http://127.0.0.1:8071/`
+- 请求方法：`POST`
+- 若 NapCat 支持上报密钥，请与本项目保持一致（当前本项目主要使用 WS Token）
+
+然后在本项目 `config.yml` 对应填写：
+
+```yaml
+http_host: "0.0.0.0"
+http_port: 8071
+http_port_fallback: false
+```
+
+说明：
+- `http_port_fallback` 建议保持 `false`，避免端口漂移导致 NapCat 回调失效。
+- 若端口冲突，请先释放占用进程后再启动本项目。
+
+### 5.3 联调自检清单
+
+1. 启动项目后看到日志：
+   - `go bot listening at ...:8071`
+2. NapCat 发送任意消息到机器人后，项目进程无报错
+3. 执行 `/jm help` 能收到回复
+4. 识图链路测试：
+   - 发送 `/jm search`
+   - 120 秒内发送一张图片
+
+若失败，优先检查：
+- NapCat HTTP 客户端 URL 是否写成 `http://<项目IP>:8071/`
+- `websocket_url` / `websocket_token` 是否与 NapCat WS 服务端一致
+- 8071 端口是否被其他进程占用
+## 6. systemd 管理
 
 程序内置安装/卸载参数：
 
@@ -145,7 +210,7 @@ sudo ./bin/napcat-jm-go --uninstall
 - `--service-user`（默认当前登录用户 / `SUDO_USER`）
 - `--service-group`（默认用户主组）
 
-## 6. 识图链路说明
+## 7. 识图链路说明
 
 识图输入会按以下顺序解析：
 1. `image.base64`
@@ -158,7 +223,7 @@ Cloudflare 处理：
 - 命中拦截后调用 `cf_bypass_api_url` 轮询获取 `cf_clearance`
 - 推荐使用外置 bypass 服务，稳定且无需本机浏览器
 
-## 7. 常见问题
+## 8. 常见问题
 
 ### Q1: 启动报端口占用
 报错示例：`bind: address already in use`
@@ -182,7 +247,7 @@ kill <pid>
 - 先看日志中的 `[soutu-debug]` 行（已内置）
 - 重点看是否命中 armed 窗口、是否提取到图片源、`get_image` 是否成功
 
-## 8. 日志与调试
+## 9. 日志与调试
 
 识图相关调试日志前缀：
 - `[soutu-debug] recv event`
@@ -193,7 +258,7 @@ kill <pid>
 
 如果需要排障，建议贴出同一时段完整日志片段（含 group/user/scope 行）。
 
-## 9. 安全与运维建议
+## 10. 安全与运维建议
 
 - `config.yml` 不入库（已在 `.gitignore`）
 - `enc_password_*` 建议使用强密码并定期轮换
