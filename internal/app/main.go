@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -36,11 +37,14 @@ import (
 )
 
 type Config struct {
-	AdminID        int64  `yaml:"admin_id"`
-	HTTPHost       string `yaml:"http_host"`
-	HTTPPort       int    `yaml:"http_port"`
-	WebsocketURL   string `yaml:"websocket_url"`
-	WebsocketToken string `yaml:"websocket_token"`
+	AdminID              int64  `yaml:"admin_id"`
+	HTTPHost             string `yaml:"http_host"`
+	HTTPPort             int    `yaml:"http_port"`
+	PreviewHost          string `yaml:"preview_host"`
+	PreviewPort          int    `yaml:"preview_port"`
+	PreviewPublicBaseURL string `yaml:"preview_public_base_url"`
+	WebsocketURL         string `yaml:"websocket_url"`
+	WebsocketToken       string `yaml:"websocket_token"`
 
 	FileDir           string `yaml:"file_dir"`
 	MangaDir          string `yaml:"manga_dir"`
@@ -239,6 +243,9 @@ func Main() {
 	mainMux := http.NewServeMux()
 	mainMux.HandleFunc("/", app.handleHTTPEvent)
 	mainServer := &http.Server{Handler: mainMux}
+	previewMux := http.NewServeMux()
+	app.registerPreviewRoutes(previewMux)
+	previewServer := &http.Server{Handler: previewMux}
 
 	mainTries := 1
 	if cfg.HTTPPortFallback {
@@ -250,6 +257,25 @@ func Main() {
 	}
 	if mainPort != cfg.HTTPPort {
 		log.Printf("main port %d unavailable, fallback to %d", cfg.HTTPPort, mainPort)
+	}
+	previewListener, previewPort, err := listenWithFallback(cfg.PreviewHost, cfg.PreviewPort, cfg.PortFallbackTries)
+	if err != nil {
+		log.Fatalf("listen preview http failed: %v", err)
+	}
+	if previewPort != cfg.PreviewPort {
+		log.Printf("preview port %d unavailable, fallback to %d", cfg.PreviewPort, previewPort)
+	}
+	var previewExtraListener net.Listener
+	if altHost := pairedHostForDualStack(cfg.PreviewHost); altHost != "" {
+		altAddr := net.JoinHostPort(altHost, strconv.Itoa(previewPort))
+		ln, listenErr := net.Listen("tcp", altAddr)
+		if listenErr == nil {
+			previewExtraListener = ln
+		} else if isAddrInUseErr(listenErr) {
+			log.Printf("preview %s is already covered by dual-stack listener", altAddr)
+		} else {
+			log.Printf("preview extra listener %s failed: %v", altAddr, listenErr)
+		}
 	}
 
 	var bypassServer *http.Server
@@ -287,6 +313,20 @@ func Main() {
 			errCh <- serveErr
 		}
 	}()
+	go func() {
+		log.Printf("cbz preview listening at %s", previewListener.Addr().String())
+		if serveErr := previewServer.Serve(previewListener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			errCh <- serveErr
+		}
+	}()
+	if previewExtraListener != nil {
+		go func() {
+			log.Printf("cbz preview listening at %s", previewExtraListener.Addr().String())
+			if serveErr := previewServer.Serve(previewExtraListener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+				errCh <- serveErr
+			}
+		}()
+	}
 
 	select {
 	case <-ctx.Done():
@@ -299,6 +339,9 @@ func Main() {
 	defer cancel()
 	if err := mainServer.Shutdown(shutdownCtx); err != nil {
 		log.Printf("main server shutdown error: %v", err)
+	}
+	if err := previewServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("preview server shutdown error: %v", err)
 	}
 	if bypassServer != nil {
 		if err := bypassServer.Shutdown(shutdownCtx); err != nil {
@@ -357,6 +400,9 @@ func writeMinimalConfigTemplate(configPath string) error {
 admin_id: 0
 http_host: "0.0.0.0"
 http_port: 8071
+preview_host: "::"
+preview_port: 3502
+preview_public_base_url: "https://jm.zuichen.top:3502"
 
 # NapCat OneBot WebSocket 地址与鉴权
 websocket_url: "ws://127.0.0.1:13001"
@@ -389,6 +435,20 @@ func fillDefaults(cfg *Config) {
 	if cfg.HTTPPort == 0 {
 		cfg.HTTPPort = 8071
 	}
+	if strings.TrimSpace(cfg.PreviewHost) == "" {
+		cfg.PreviewHost = "::"
+	}
+	if cfg.PreviewPort <= 0 {
+		cfg.PreviewPort = 3502
+	}
+	if strings.TrimSpace(cfg.PreviewPublicBaseURL) == "" {
+		previewHost := strings.TrimSpace(cfg.PreviewHost)
+		if previewHost == "" || previewHost == "::" || previewHost == "0.0.0.0" {
+			previewHost = "127.0.0.1"
+		}
+		cfg.PreviewPublicBaseURL = fmt.Sprintf("http://%s:%d", previewHost, cfg.PreviewPort)
+	}
+	cfg.PreviewPublicBaseURL = strings.TrimRight(strings.TrimSpace(cfg.PreviewPublicBaseURL), "/")
 	if cfg.WebsocketURL == "" {
 		cfg.WebsocketURL = "ws://127.0.0.1:13001"
 	}
@@ -523,7 +583,7 @@ func listenWithFallback(host string, preferredPort, tries int) (net.Listener, in
 	lastErr := error(nil)
 	for i := 0; i < tries; i++ {
 		p := preferredPort + i
-		addr := fmt.Sprintf("%s:%d", host, p)
+		addr := net.JoinHostPort(host, strconv.Itoa(p))
 		ln, err := net.Listen("tcp", addr)
 		if err == nil {
 			return ln, p, nil
@@ -558,6 +618,18 @@ func clientHost(host string) string {
 		return "127.0.0.1"
 	}
 	return h
+}
+
+func pairedHostForDualStack(host string) string {
+	h := strings.TrimSpace(host)
+	switch h {
+	case "::":
+		return "0.0.0.0"
+	case "0.0.0.0":
+		return "::"
+	default:
+		return ""
+	}
 }
 
 func installSystemdService(serviceName, serviceUser, serviceGroup string) error {
@@ -738,7 +810,7 @@ func (s *embeddedBypassService) handleBypassV1(w http.ResponseWriter, r *http.Re
 	}
 	if !s.running[cacheKey] {
 		s.running[cacheKey] = true
-		polling := bypassResponse{Message: "正在解密 cloudflare 5s 盾，请继续轮询"}
+		polling := bypassResponse{Message: "正在处理 cloudflare 验证（自动等待/点击），请继续轮询"}
 		s.cache[cacheKey] = embeddedCacheItem{Data: polling, ExpiresAt: now.Add(60 * time.Second)}
 		go s.solve(cacheKey, q)
 	}
@@ -813,7 +885,7 @@ func runCloudflareBypass(q bypassQuery) (bypassResponse, error) {
 	if err := chromedp.Run(ctx, chromedp.Navigate(q.URL)); err != nil {
 		return bypassResponse{}, fmt.Errorf("navigate: %w", err)
 	}
-	// Cloudflare 5s challenge usually resolves automatically without clicks.
+	// First try passive wait for the common 5s challenge.
 	time.Sleep(6 * time.Second)
 
 	var userAgent string
@@ -822,9 +894,16 @@ func runCloudflareBypass(q bypassQuery) (bypassResponse, error) {
 	}
 
 	for i := 0; i < 75; i++ {
-		// Poll cookies; for default 5s shield cf_clearance appears automatically.
+		// Poll cookies; default 5s shield may resolve automatically.
 		if i > 0 {
 			time.Sleep(2 * time.Second)
+		}
+		// Some pages require clicking challenge widgets instead of passive wait.
+		if i >= 3 && (i == 3 || i%8 == 0) {
+			clicked := tryCloudflareChallengeClick(ctx)
+			if clicked > 0 {
+				log.Printf("embedded bypass: challenge click attempts=%d", clicked)
+			}
 		}
 
 		var cookies []*network.Cookie
@@ -849,7 +928,76 @@ func runCloudflareBypass(q bypassQuery) (bypassResponse, error) {
 		}
 	}
 
-	return bypassResponse{}, errors.New("no cf_clearance cookie acquired after waiting challenge window (~150s)")
+	return bypassResponse{}, errors.New("no cf_clearance cookie acquired after passive+interactive challenge window (~150s)")
+}
+
+func tryCloudflareChallengeClick(ctx context.Context) int {
+	clickedTotal := 0
+
+	// Click visible challenge-like controls in document and open shadow roots.
+	js := `(function () {
+		let clicked = 0;
+		const tryClick = (el) => {
+			if (!el) return;
+			const r = el.getBoundingClientRect();
+			if (r.width < 2 || r.height < 2) return;
+			el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+			el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+			if (typeof el.click === 'function') el.click();
+			clicked++;
+		};
+		const selectors = [
+			'#challenge-stage input[type="checkbox"]',
+			'input[type="checkbox"]',
+			'#challenge-stage button',
+			'button',
+			'[role="button"]',
+			'[data-testid*="challenge"]',
+			'[id*="challenge"]'
+		];
+		for (const sel of selectors) {
+			for (const el of document.querySelectorAll(sel)) {
+				tryClick(el);
+			}
+		}
+		for (const host of document.querySelectorAll('*')) {
+			if (!host.shadowRoot) continue;
+			for (const el of host.shadowRoot.querySelectorAll('input[type="checkbox"], button, [role="button"]')) {
+				tryClick(el);
+			}
+		}
+		return clicked;
+	})();`
+	var clicked int64
+	if err := chromedp.Run(ctx, chromedp.Evaluate(js, &clicked)); err == nil && clicked > 0 {
+		clickedTotal += int(clicked)
+	}
+
+	// If Cloudflare challenge is inside iframe, click its center area.
+	var iframePoint map[string]float64
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const nodes = Array.from(document.querySelectorAll('iframe'));
+		const target = nodes.find((f) => {
+			const src = (f.getAttribute('src') || '').toLowerCase();
+			const title = (f.getAttribute('title') || '').toLowerCase();
+			return src.includes('challenges.cloudflare.com') || title.includes('challenge') || title.includes('security');
+		});
+		if (!target) return null;
+		const r = target.getBoundingClientRect();
+		if (r.width < 2 || r.height < 2) return null;
+		return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+	})()`, &iframePoint)); err == nil {
+		if iframePoint != nil {
+			x, xok := iframePoint["x"]
+			y, yok := iframePoint["y"]
+			if xok && yok {
+				if err := chromedp.Run(ctx, chromedp.MouseClickXY(x, y)); err == nil {
+					clickedTotal++
+				}
+			}
+		}
+	}
+	return clickedTotal
 }
 
 func resolveChromeExecPath() (string, error) {
@@ -983,6 +1131,9 @@ func (a *App) handleMessageEvent(data map[string]any) {
 		return
 	}
 	if a.handleCfgCommand(rawMessage, messageType, groupID, userID) {
+		return
+	}
+	if a.handleDedupCommand(rawMessage, messageType, groupID, userID) {
 		return
 	}
 	if m := mustMatch(`^/jm\s+mode\s+(pdf|zip)$`, rawMessage); m != nil {
@@ -1415,6 +1566,140 @@ func parseSwitchBool(raw string) (bool, bool) {
 	}
 }
 
+func (a *App) handleDedupCommand(rawMessage, messageType string, groupID, userID int64) bool {
+	if !matched(`^/jm\s+dedup(?:\s+.*)?$`, rawMessage) {
+		return false
+	}
+	if !a.requireAdmin(messageType, groupID, userID, "仅管理员可管理重复请求冷却") {
+		return true
+	}
+
+	usage := "用法：\n" +
+		"/jm dedup show\n" +
+		"/jm dedup set <秒数|Go时长(如 30m/12h)>\n" +
+		"/jm dedup clear <本子ID>"
+
+	if matched(`^/jm\s+dedup\s+show$`, rawMessage) {
+		a.cfgMu.RLock()
+		seconds := a.cfg.DedupWindow
+		a.cfgMu.RUnlock()
+		if seconds <= 0 {
+			a.sendMessage(messageType, groupID, userID, "当前重复请求冷却：已关闭（0秒）")
+			return true
+		}
+		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("当前重复请求冷却：%d秒（%s）", seconds, formatDedupWindow(seconds)))
+		return true
+	}
+	if m := mustMatch(`^/jm\s+dedup\s+set\s+(\S+)$`, rawMessage); m != nil {
+		seconds, err := parseDedupWindowSeconds(m[1])
+		if err != nil {
+			a.sendMessage(messageType, groupID, userID, "冷却时长无效，请使用正整数秒或 Go 时长（例如 1800 / 30m / 12h）")
+			return true
+		}
+		a.cfgMu.Lock()
+		a.cfg.DedupWindow = seconds
+		a.cfgMu.Unlock()
+		a.saveConfig()
+		if seconds <= 0 {
+			a.sendMessage(messageType, groupID, userID, "重复请求冷却已关闭")
+			return true
+		}
+		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("重复请求冷却已设为：%d秒（%s）", seconds, formatDedupWindow(seconds)))
+		return true
+	}
+	if m := mustMatch(`^/jm\s+dedup\s+clear\s+(\d+)$`, rawMessage); m != nil {
+		number := strings.TrimSpace(m[1])
+		cleared := a.clearRecentRequest(number)
+		if cleared == 0 {
+			a.sendMessage(messageType, groupID, userID, "该本子当前没有冷却记录：JM"+number)
+			return true
+		}
+		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("已清除本子冷却：JM%s（影响作用域 %d 个）", number, cleared))
+		return true
+	}
+
+	a.sendMessage(messageType, groupID, userID, usage)
+	return true
+}
+
+func parseDedupWindowSeconds(raw string) (int, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return 0, errors.New("empty value")
+	}
+	if n, err := strconv.Atoi(s); err == nil {
+		if n < 0 {
+			return 0, errors.New("negative seconds")
+		}
+		return n, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, err
+	}
+	sec := int(d.Seconds())
+	if d > 0 && sec == 0 {
+		sec = 1
+	}
+	if sec < 0 {
+		return 0, errors.New("negative duration")
+	}
+	return sec, nil
+}
+
+func formatDedupWindow(seconds int) string {
+	if seconds <= 0 {
+		return "0秒"
+	}
+	day := seconds / 86400
+	seconds %= 86400
+	hour := seconds / 3600
+	seconds %= 3600
+	min := seconds / 60
+	sec := seconds % 60
+
+	parts := make([]string, 0, 4)
+	if day > 0 {
+		parts = append(parts, fmt.Sprintf("%d天", day))
+	}
+	if hour > 0 {
+		parts = append(parts, fmt.Sprintf("%d小时", hour))
+	}
+	if min > 0 {
+		parts = append(parts, fmt.Sprintf("%d分钟", min))
+	}
+	if sec > 0 {
+		parts = append(parts, fmt.Sprintf("%d秒", sec))
+	}
+	if len(parts) == 0 {
+		return "0秒"
+	}
+	return strings.Join(parts, "")
+}
+
+func (a *App) clearRecentRequest(number string) int {
+	number = strings.TrimSpace(number)
+	if number == "" {
+		return 0
+	}
+	a.recentMu.Lock()
+	defer a.recentMu.Unlock()
+	clearedScopes := 0
+	for scope, m := range a.recent {
+		if m == nil {
+			continue
+		}
+		if _, ok := m[number]; ok {
+			delete(m, number)
+			clearedScopes++
+		}
+		if len(m) == 0 {
+			delete(a.recent, scope)
+		}
+	}
+	return clearedScopes
+}
+
 func (a *App) isJMAllowed(messageType string, groupID, userID int64) bool {
 	a.cfgMu.RLock()
 	defer a.cfgMu.RUnlock()
@@ -1453,9 +1738,9 @@ func (a *App) enqueueDownloads(numbers []string, messageType string, groupID, us
 			a.sendMessage(messageType, groupID, userID, "禁止下载或用户被封禁")
 			continue
 		}
-		if a.isRecentRequest(scope, n, time.Duration(cfg.DedupWindow)*time.Second) {
+		if cfg.DedupWindow > 0 && a.isRecentRequest(scope, n, time.Duration(cfg.DedupWindow)*time.Second) {
 			if len(n) >= 4 {
-				a.sendMessage(messageType, groupID, userID, "本子 "+n+" 在过去12小时内已请求过，已跳过")
+				a.sendMessage(messageType, groupID, userID, fmt.Sprintf("本子 %s 在过去%s内已请求过，已跳过", n, formatDedupWindow(cfg.DedupWindow)))
 			}
 			continue
 		}
@@ -1483,36 +1768,6 @@ func (a *App) worker() {
 
 func (a *App) processTask(task DownloadTask) {
 	cfg := a.currentConfig()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.DownloadTimeout)*time.Second)
-	defer cancel()
-
-	album, err := a.jm.GetAlbum(ctx, task.Number)
-	if err != nil || album == nil {
-		if len(task.Number) < 4 {
-			return
-		}
-		a.sendMessage(task.MessageType, task.GroupID, task.UserID, "未能成功下载（可能ID错误或网络失败）")
-		return
-	}
-	if album.Episodes > cfg.MaxEpisodes {
-		a.sendMessage(task.MessageType, task.GroupID, task.UserID, fmt.Sprintf("本子章节过多(>%d)", cfg.MaxEpisodes))
-		return
-	}
-
-	path, name := findPDF(cfg.FileDir, task.Number, album.Title)
-	if path == "" {
-		a.sendMessage(task.MessageType, task.GroupID, task.UserID, "正在下载本子 "+task.Number)
-		if err := a.jm.Download(ctx, task.Number); err != nil {
-			a.sendMessage(task.MessageType, task.GroupID, task.UserID, "下载失败或超时")
-			return
-		}
-		path, name = findPDF(cfg.FileDir, task.Number, album.Title)
-		if path == "" {
-			a.sendMessage(task.MessageType, task.GroupID, task.UserID, "下载完成但未找到PDF文件")
-			return
-		}
-	}
-
 	sendMode := cfg.SendModeGlobal
 	if task.MessageType == "group" {
 		if v, ok := cfg.SendModeGroup[strconv.FormatInt(task.GroupID, 10)]; ok {
@@ -1526,15 +1781,79 @@ func (a *App) processTask(task DownloadTask) {
 		}
 	}
 
-	sendPath := path
-	cleanup := []string{}
-
 	encEnabled := cfg.EncEnabledGlobal
 	if task.MessageType == "group" {
 		if v, ok := cfg.EncEnabledGroup[strconv.FormatInt(task.GroupID, 10)]; ok {
 			encEnabled = v
 		}
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.DownloadTimeout)*time.Second)
+	defer cancel()
+
+	path := ""
+	name := ""
+	albumTitle := ""
+	needDownload := true
+
+	// Reuse locally downloaded files whenever possible.
+	if !encEnabled {
+		if sendMode == "zip" {
+			if book, found, _ := a.findBookByID(task.Number); found && strings.TrimSpace(book.Path) != "" {
+				path = book.Path
+				name = filepath.Base(book.Path)
+				albumTitle = strings.TrimSpace(book.Title)
+				needDownload = false
+				log.Printf("reuse local cbz for JM%s path=%s", task.Number, path)
+			}
+		} else {
+			path, name = findPDF(cfg.FileDir, task.Number, "")
+			if path != "" {
+				albumTitle = strings.TrimSpace(strings.TrimSuffix(name, filepath.Ext(name)))
+				needDownload = false
+				log.Printf("reuse local pdf for JM%s path=%s", task.Number, path)
+			}
+		}
+	}
+
+	if needDownload || encEnabled {
+		album, err := a.jm.GetAlbum(ctx, task.Number)
+		if err != nil || album == nil {
+			if len(task.Number) < 4 {
+				return
+			}
+			a.sendMessage(task.MessageType, task.GroupID, task.UserID, "未能成功下载（可能ID错误或网络失败）")
+			return
+		}
+		if album.Episodes > cfg.MaxEpisodes {
+			a.sendMessage(task.MessageType, task.GroupID, task.UserID, fmt.Sprintf("本子章节过多(>%d)", cfg.MaxEpisodes))
+			return
+		}
+		if strings.TrimSpace(albumTitle) == "" {
+			albumTitle = strings.TrimSpace(album.Title)
+		}
+		if needDownload {
+			path, name = findPDF(cfg.FileDir, task.Number, album.Title)
+			if path == "" {
+				a.sendMessage(task.MessageType, task.GroupID, task.UserID, "正在下载本子 "+task.Number)
+				if err := a.jm.Download(ctx, task.Number); err != nil {
+					a.sendMessage(task.MessageType, task.GroupID, task.UserID, "下载失败或超时")
+					return
+				}
+				path, name = findPDF(cfg.FileDir, task.Number, album.Title)
+				if path == "" {
+					a.sendMessage(task.MessageType, task.GroupID, task.UserID, "下载完成但未找到PDF文件")
+					return
+				}
+			}
+		}
+	}
+	if strings.TrimSpace(albumTitle) == "" {
+		albumTitle = "JM" + task.Number
+	}
+
+	sendPath := path
+	cleanup := []string{}
+
 	password := ""
 	randomPasswordEnabled := cfg.RandomPasswordEnabledGlobal
 	if task.MessageType == "group" {
@@ -1566,7 +1885,7 @@ func (a *App) processTask(task DownloadTask) {
 		sendPath = encOut
 	}
 
-	if sendMode == "zip" {
+	if sendMode == "zip" && !strings.EqualFold(filepath.Ext(sendPath), ".zip") && !strings.EqualFold(filepath.Ext(sendPath), ".cbz") {
 		zipPath, err := buildZip(sendPath)
 		if err != nil {
 			a.sendMessage(task.MessageType, task.GroupID, task.UserID, "文件压缩失败")
@@ -1576,7 +1895,7 @@ func (a *App) processTask(task DownloadTask) {
 		sendPath = zipPath
 	}
 
-	baseName := sanitizeFileName(album.Title)
+	baseName := sanitizeFileName(albumTitle)
 	if nameMode == "jm" {
 		baseName = "JM" + task.Number
 	}
@@ -1596,10 +1915,10 @@ func (a *App) processTask(task DownloadTask) {
 
 	sizeMB := fileSizeMB(sendPath)
 	label := "PDF"
-	if strings.HasSuffix(strings.ToLower(sendPath), ".zip") {
+	if strings.HasSuffix(strings.ToLower(sendPath), ".zip") || strings.HasSuffix(strings.ToLower(sendPath), ".cbz") {
 		label = "ZIP"
 	}
-	msg := fmt.Sprintf("正在发送：\n车牌号：%s\n本子名：%s\n文件类型：%s\n文件大小：(%.2fMB)", task.Number, album.Title, label, sizeMB)
+	msg := fmt.Sprintf("正在发送：\n车牌号：%s\n本子名：%s\n文件类型：%s\n文件大小：(%.2fMB)", task.Number, albumTitle, label, sizeMB)
 	if encEnabled {
 		msg += "\n密码：" + password
 	}
@@ -1616,7 +1935,11 @@ func (a *App) processTask(task DownloadTask) {
 		ok = a.bot.SendPrivateFile(cfg, task.UserID, sendPath)
 	}
 	if !ok {
-		a.sendMessage(task.MessageType, task.GroupID, task.UserID, "文件发送失败")
+		failMsg := "文件发送失败"
+		if book, found, _ := a.findBookByID(task.Number); found && strings.TrimSpace(book.ID) != "" {
+			failMsg += "\n可在线预览/下载：" + a.previewPublicURL(book.ID)
+		}
+		a.sendMessage(task.MessageType, task.GroupID, task.UserID, failMsg)
 	}
 
 	for _, c := range cleanup {
@@ -2004,6 +2327,19 @@ func htmlUnescape(s string) string {
 	return replacer.Replace(s)
 }
 
+func (a *App) previewPublicURL(id string) string {
+	cfg := a.currentConfig()
+	base := strings.TrimRight(strings.TrimSpace(cfg.PreviewPublicBaseURL), "/")
+	if base == "" {
+		base = fmt.Sprintf("http://127.0.0.1:%d", cfg.PreviewPort)
+	}
+	id = normalizeJMID(id)
+	if id == "" {
+		return base
+	}
+	return base + "/" + id
+}
+
 func findPDF(dir, number, title string) (string, string) {
 	if number != "" {
 		for _, n := range []string{number + ".pdf", "JM" + number + ".pdf"} {
@@ -2332,21 +2668,32 @@ func searchSoutuByImageURL(imageURL string, cfg Config) (map[string]any, error) 
 
 func searchSoutu(imageBytes []byte, cfg Config, client *http.Client) (map[string]any, error) {
 	cookies := currentCFCookies()
-	result, status, respBody, err := searchSoutuOnce(imageBytes, cfg, client, cookies)
+	defaultKey := generateSoutuAPIKey(cfg.SoutuUserAgent, cfg.SoutuGlobalM)
+	result, status, respBody, err := searchSoutuOnce(imageBytes, cfg, client, cookies, defaultKey)
 	if err != nil {
 		return nil, err
 	}
 	if status >= 200 && status < 300 {
 		return result, nil
 	}
-	if isCloudflareBlocked(status, respBody) {
+	if shouldTryCloudflareBypass(status, respBody, len(cookies) > 0) {
+		log.Printf("soutu detected potential CF block status=%d body=%q cookies_present=%t", status, strings.TrimSpace(string(respBody)), len(cookies) > 0)
 		if err := ensureCfCookies(cfg, client); err == nil {
-			result, status, respBody, err = searchSoutuOnce(imageBytes, cfg, client, currentCFCookies())
+			result, status, respBody, err = searchSoutuWithAuthFallback(imageBytes, cfg, client, currentCFCookies())
 			if err != nil {
 				return nil, err
 			}
 			if status >= 200 && status < 300 {
 				return result, nil
+			}
+			log.Printf("soutu retry after bypass still failed status=%d body=%q", status, strings.TrimSpace(string(respBody)))
+			if status == http.StatusUnauthorized {
+				log.Printf("soutu fallback to browser-context request after 401")
+				if browserResult, browserErr := searchSoutuViaBrowser(imageBytes, cfg); browserErr == nil {
+					return browserResult, nil
+				} else {
+					log.Printf("soutu browser-context fallback failed: %v", browserErr)
+				}
 			}
 		} else {
 			return nil, fmt.Errorf("cloudflare bypass failed: %w", err)
@@ -2355,7 +2702,52 @@ func searchSoutu(imageBytes []byte, cfg Config, client *http.Client) (map[string
 	return nil, fmt.Errorf("soutu status %d: %s", status, strings.TrimSpace(string(respBody)))
 }
 
-func searchSoutuOnce(imageBytes []byte, cfg Config, client *http.Client, cookies map[string]string) (map[string]any, int, []byte, error) {
+func searchSoutuWithAuthFallback(imageBytes []byte, cfg Config, client *http.Client, cookies map[string]string) (map[string]any, int, []byte, error) {
+	type authTry struct {
+		label string
+		key   string
+	}
+	tries := []authTry{{
+		label: "cfg_global_m",
+		key:   generateSoutuAPIKey(cfg.SoutuUserAgent, cfg.SoutuGlobalM),
+	}}
+	if dynamicM, ok := fetchSoutuGlobalM(cfg, client, cookies); ok && dynamicM > 0 && dynamicM != cfg.SoutuGlobalM {
+		tries = append(tries, authTry{
+			label: "dynamic_global_m",
+			key:   generateSoutuAPIKey(cfg.SoutuUserAgent, dynamicM),
+		})
+	}
+	tries = append(tries, authTry{label: "no_api_key", key: ""})
+
+	seenKey := map[string]struct{}{}
+	var lastResult map[string]any
+	var lastStatus int
+	var lastBody []byte
+	for _, tr := range tries {
+		if _, ok := seenKey[tr.key]; ok {
+			continue
+		}
+		seenKey[tr.key] = struct{}{}
+		result, status, respBody, err := searchSoutuOnce(imageBytes, cfg, client, cookies, tr.key)
+		if err != nil {
+			return nil, 0, nil, err
+		}
+		if status >= 200 && status < 300 {
+			if tr.label != "cfg_global_m" {
+				log.Printf("soutu auth fallback success strategy=%s", tr.label)
+			}
+			return result, status, respBody, nil
+		}
+		lastResult, lastStatus, lastBody = result, status, respBody
+		log.Printf("soutu auth strategy failed strategy=%s status=%d body=%q", tr.label, status, strings.TrimSpace(string(respBody)))
+		if status != http.StatusUnauthorized {
+			break
+		}
+	}
+	return lastResult, lastStatus, lastBody, nil
+}
+
+func searchSoutuOnce(imageBytes []byte, cfg Config, client *http.Client, cookies map[string]string, apiKey string) (map[string]any, int, []byte, error) {
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
 	_ = mw.WriteField("factor", fmt.Sprintf("%g", cfg.SoutuFactor))
@@ -2377,7 +2769,9 @@ func searchSoutuOnce(imageBytes []byte, cfg Config, client *http.Client, cookies
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	req.Header.Set("User-Agent", cfg.SoutuUserAgent)
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	req.Header.Set("X-API-KEY", generateSoutuAPIKey(cfg.SoutuUserAgent, cfg.SoutuGlobalM))
+	if strings.TrimSpace(apiKey) != "" {
+		req.Header.Set("X-API-KEY", apiKey)
+	}
 	req.Header.Set("Referer", cfg.SoutuURL)
 	for k, v := range cookies {
 		req.AddCookie(&http.Cookie{Name: k, Value: v})
@@ -2400,6 +2794,183 @@ func searchSoutuOnce(imageBytes []byte, cfg Config, client *http.Client, cookies
 	return out, resp.StatusCode, nil, nil
 }
 
+func fetchSoutuGlobalM(cfg Config, client *http.Client, cookies map[string]string) (int64, bool) {
+	req, err := http.NewRequest(http.MethodGet, cfg.SoutuURL, nil)
+	if err != nil {
+		return 0, false
+	}
+	req.Header.Set("User-Agent", cfg.SoutuUserAgent)
+	req.Header.Set("Referer", cfg.SoutuURL)
+	for k, v := range cookies {
+		req.AddCookie(&http.Cookie{Name: k, Value: v})
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return 0, false
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	if err != nil {
+		return 0, false
+	}
+	html := string(raw)
+	re := regexp.MustCompile(`(?i)global[_-]?m["']?\s*[:=]\s*["']?(\d{6,})`)
+	m := re.FindStringSubmatch(html)
+	if len(m) < 2 {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	log.Printf("soutu dynamic global_m extracted: %d", n)
+	return n, true
+}
+
+func searchSoutuViaBrowser(imageBytes []byte, cfg Config) (map[string]any, error) {
+	browserPath, err := resolveChromeExecPath()
+	if err != nil {
+		return nil, err
+	}
+
+	opts := []chromedp.ExecAllocatorOption{
+		chromedp.ExecPath(browserPath),
+		chromedp.NoFirstRun,
+		chromedp.NoDefaultBrowserCheck,
+		chromedp.Flag("force-color-profile", "srgb"),
+		chromedp.Flag("metrics-recording-only", true),
+		chromedp.Flag("password-store", "basic"),
+		chromedp.Flag("use-mock-keychain", true),
+		chromedp.Flag("export-tagged-pdf", true),
+		chromedp.Flag("disable-background-mode", true),
+		chromedp.Flag("enable-features", "NetworkService,NetworkServiceInProcess,LoadCryptoTokenExtension,PermuteTLSExtensions"),
+		chromedp.Flag("disable-features", "FlashDeprecationWarning,EnablePasswordsAccountStorage"),
+		chromedp.Flag("deny-permission-prompts", true),
+		chromedp.DisableGPU,
+		chromedp.Flag("accept-lang", "en-US"),
+	}
+	if runtime.GOOS == "linux" {
+		opts = append(opts, chromedp.Headless)
+		opts = append(opts, chromedp.Flag("no-sandbox", true))
+	}
+	if strings.TrimSpace(cfg.SoutuUserAgent) != "" {
+		opts = append(opts, chromedp.UserAgent(strings.TrimSpace(cfg.SoutuUserAgent)))
+	}
+
+	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
+	defer allocCancel()
+	ctx, cancel := chromedp.NewContext(allocCtx, chromedp.WithLogf(func(string, ...any) {}))
+	defer cancel()
+	ctx, timeoutCancel := context.WithTimeout(ctx, 180*time.Second)
+	defer timeoutCancel()
+
+	if err := chromedp.Run(ctx, chromedp.Navigate(cfg.SoutuURL)); err != nil {
+		return nil, fmt.Errorf("browser navigate: %w", err)
+	}
+	time.Sleep(6 * time.Second)
+	for i := 0; i < 30; i++ {
+		if i >= 2 && (i == 2 || i%7 == 0) {
+			_ = tryCloudflareChallengeClick(ctx)
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	type authTry struct {
+		label string
+		key   string
+	}
+	tries := []authTry{{label: "cfg_global_m", key: generateSoutuAPIKey(cfg.SoutuUserAgent, cfg.SoutuGlobalM)}}
+	tries = append(tries, authTry{label: "no_api_key", key: ""})
+
+	b64 := base64.StdEncoding.EncodeToString(imageBytes)
+	factor := fmt.Sprintf("%g", cfg.SoutuFactor)
+	for _, tr := range tries {
+		status, body, err := runBrowserSoutuFetch(ctx, cfg.SoutuAPI, cfg.SoutuURL, factor, b64, tr.key)
+		if err != nil {
+			log.Printf("browser soutu auth strategy error strategy=%s err=%v", tr.label, err)
+			continue
+		}
+		if status >= 200 && status < 300 {
+			out := map[string]any{}
+			if err := json.Unmarshal([]byte(body), &out); err != nil {
+				return nil, fmt.Errorf("browser soutu parse json failed: %w", err)
+			}
+			log.Printf("browser soutu auth strategy success strategy=%s", tr.label)
+			return out, nil
+		}
+		log.Printf("browser soutu auth strategy failed strategy=%s status=%d body=%q", tr.label, status, strings.TrimSpace(body))
+	}
+	return nil, errors.New("browser soutu request failed after all auth strategies")
+}
+
+func runBrowserSoutuFetch(ctx context.Context, apiURL, referer, factor, imageB64, apiKey string) (int, string, error) {
+	toJS := func(s string) string {
+		b, _ := json.Marshal(s)
+		return string(b)
+	}
+	script := fmt.Sprintf(`(() => {
+		window.__soutu_result = null;
+		window.__soutu_error = null;
+		(async () => {
+			try {
+				const apiURL = %s;
+				const referer = %s;
+				const factor = %s;
+				const b64 = %s;
+				const apiKey = %s;
+				const bin = atob(b64);
+				const arr = new Uint8Array(bin.length);
+				for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+				const blob = new Blob([arr], { type: 'image/jpeg' });
+				const fd = new FormData();
+				fd.append('factor', factor);
+				fd.append('file', blob, 'image.jpg');
+				const headers = { 'X-Requested-With': 'XMLHttpRequest', 'Referer': referer };
+				if (apiKey) headers['X-API-KEY'] = apiKey;
+				const resp = await fetch(apiURL, { method: 'POST', body: fd, credentials: 'include', headers });
+				const text = await resp.text();
+				window.__soutu_result = { status: resp.status, body: text };
+			} catch (e) {
+				window.__soutu_error = String(e);
+			}
+		})();
+		return true;
+	})()`, toJS(apiURL), toJS(referer), toJS(factor), toJS(imageB64), toJS(apiKey))
+
+	var kicked bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(script, &kicked)); err != nil {
+		return 0, "", err
+	}
+
+	for i := 0; i < 100; i++ {
+		time.Sleep(300 * time.Millisecond)
+		var pollRaw string
+		pollJS := `(() => {
+			if (window.__soutu_error) return JSON.stringify({ done: true, error: String(window.__soutu_error) });
+			if (window.__soutu_result) return JSON.stringify({ done: true, status: window.__soutu_result.status, body: window.__soutu_result.body || "" });
+			return JSON.stringify({ done: false });
+		})()`
+		if err := chromedp.Run(ctx, chromedp.Evaluate(pollJS, &pollRaw)); err != nil {
+			continue
+		}
+		out := map[string]any{}
+		if err := json.Unmarshal([]byte(pollRaw), &out); err != nil {
+			continue
+		}
+		if done, _ := out["done"].(bool); !done {
+			continue
+		}
+		if errMsg := strings.TrimSpace(toString(out["error"])); errMsg != "" {
+			return 0, "", errors.New(errMsg)
+		}
+		return int(toInt64(out["status"])), toString(out["body"]), nil
+	}
+	return 0, "", errors.New("browser fetch timeout")
+}
+
 func isCloudflareBlocked(status int, body []byte) bool {
 	if status != http.StatusForbidden && status != http.StatusUnauthorized {
 		return false
@@ -2412,6 +2983,34 @@ func isCloudflareBlocked(status int, body []byte) bool {
 		strings.Contains(text, "challenge-platform")
 }
 
+func shouldTryCloudflareBypass(status int, body []byte, hasCookies bool) bool {
+	if isCloudflareBlocked(status, body) {
+		return true
+	}
+	if status != http.StatusUnauthorized {
+		return false
+	}
+	trimmed := strings.TrimSpace(string(body))
+	lower := strings.ToLower(trimmed)
+	// Some deployments return 401 with empty/near-empty body when challenge is active.
+	if trimmed == "" || trimmed == "{}" {
+		return true
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &out); err == nil {
+		msg := strings.TrimSpace(toString(out["message"]))
+		if msg == "" {
+			return true
+		}
+		lower = strings.ToLower(msg)
+	}
+	// If we already have cookies and still get explicit auth errors, avoid useless bypass loops.
+	if hasCookies {
+		return false
+	}
+	return strings.Contains(lower, "unauthorized") || strings.Contains(lower, "access denied")
+}
+
 func ensureCfCookies(cfg Config, client *http.Client) error {
 	soutuCFMu.RLock()
 	if !soutuCFCookieExpires.IsZero() && time.Now().Before(soutuCFCookieExpires) && len(soutuCFCookies) > 0 {
@@ -2420,17 +3019,33 @@ func ensureCfCookies(cfg Config, client *http.Client) error {
 	}
 	soutuCFMu.RUnlock()
 
-	res, err := pollBypassAPI(cfg, client)
-	if err != nil {
-		return err
+	targets := unique([]string{
+		strings.TrimSpace(cfg.SoutuAPI),
+		strings.TrimSpace(cfg.SoutuURL),
+	})
+	var lastErr error
+	for _, targetURL := range targets {
+		if targetURL == "" {
+			continue
+		}
+		log.Printf("trying cloudflare bypass target=%s", targetURL)
+		res, err := pollBypassAPI(cfg, client, targetURL)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if applyBypassResult(res) {
+			return nil
+		}
+		lastErr = errors.New("invalid bypass result")
 	}
-	if !applyBypassResult(res) {
-		return errors.New("invalid bypass result")
+	if lastErr == nil {
+		lastErr = errors.New("cloudflare bypass failed for all targets")
 	}
-	return nil
+	return lastErr
 }
 
-func pollBypassAPI(cfg Config, client *http.Client) (bypassResponse, error) {
+func pollBypassAPI(cfg Config, client *http.Client, targetURL string) (bypassResponse, error) {
 	deadline := time.Now().Add(time.Duration(cfg.CFBypassPollTimeout * float64(time.Second)))
 	interval := time.Duration(cfg.CFBypassPollInterval * float64(time.Second))
 	if interval <= 0 {
@@ -2439,7 +3054,7 @@ func pollBypassAPI(cfg Config, client *http.Client) (bypassResponse, error) {
 
 	var lastErr error
 	for time.Now().Before(deadline) {
-		resp, err := callBypassAPI(cfg, client)
+		resp, err := callBypassAPI(cfg, client, targetURL)
 		if err != nil {
 			lastErr = err
 			time.Sleep(interval)
@@ -2461,11 +3076,11 @@ func pollBypassAPI(cfg Config, client *http.Client) (bypassResponse, error) {
 	return bypassResponse{}, lastErr
 }
 
-func callBypassAPI(cfg Config, client *http.Client) (bypassResponse, error) {
+func callBypassAPI(cfg Config, client *http.Client, targetURL string) (bypassResponse, error) {
 	directClient := newDirectHTTPClient(client.Timeout)
 
 	payload := map[string]any{
-		"url":        cfg.SoutuURL,
+		"url":        targetURL,
 		"user_agent": cfg.SoutuUserAgent,
 	}
 	bs, _ := json.Marshal(payload)
@@ -2512,22 +3127,37 @@ func newDirectHTTPClient(timeout time.Duration) *http.Client {
 
 func applyBypassResult(res bypassResponse) bool {
 	if len(res.Cookies) == 0 {
+		log.Printf("bypass result rejected: empty cookies")
 		return false
 	}
 	cookies := map[string]string{}
+	hasClearance := false
 	for _, c := range res.Cookies {
 		if c.Name == "" || c.Value == "" {
 			continue
 		}
 		cookies[c.Name] = c.Value
+		if c.Name == "cf_clearance" {
+			hasClearance = true
+		}
 	}
 	if len(cookies) == 0 {
+		log.Printf("bypass result rejected: no valid cookie pairs")
+		return false
+	}
+	if !hasClearance {
+		names := make([]string, 0, len(cookies))
+		for k := range cookies {
+			names = append(names, k)
+		}
+		log.Printf("bypass result rejected: cf_clearance missing, got=%v", names)
 		return false
 	}
 	soutuCFMu.Lock()
 	soutuCFCookies = cookies
 	soutuCFCookieExpires = time.Now().Add(25 * time.Minute)
 	soutuCFMu.Unlock()
+	log.Printf("bypass result accepted: cookies=%d includes_cf_clearance=true", len(cookies))
 	return true
 }
 
@@ -2635,8 +3265,9 @@ func helpMessage() string {
 		"9) /jm randpwd on|off：启用随机密码加密\n" +
 		"10) /jm fname jm|full：设置发送文件命名方式\n" +
 		"11) /jm regex on|off：设置正则模式\n" +
-		"12) /jm cfg list|show|set：在线配置开关（管理员）\n" +
-		"13) /jm help：查看帮助"
+		"12) /jm dedup show|set|clear：重复请求冷却管理（管理员）\n" +
+		"13) /jm cfg list|show|set：在线配置开关（管理员）\n" +
+		"14) /jm help：查看帮助"
 }
 
 func contains(list []string, v string) bool {
@@ -2981,21 +3612,109 @@ func (c *NapcatClient) sendFile(cfg Config, action string, baseParams map[string
 		log.Printf("[local-test] file message action=%s path=%s", action, filePath)
 		return true
 	}
+
+	if streamPath, err := c.uploadFileStream(filePath, 120*time.Second); err == nil && strings.TrimSpace(streamPath) != "" {
+		streamRefs := []string{
+			streamPath,
+			"file://" + streamPath,
+		}
+		if ok, _ := c.tryPrimarySendRefs(action, baseParams, streamRefs); ok {
+			return true
+		}
+		if c.tryUploadFileFallback(action, baseParams, streamRefs, filepath.Base(filePath)) {
+			return true
+		}
+		log.Printf("stream upload completed but send still failed, fallback to staged path")
+	} else if err != nil {
+		log.Printf("upload_file_stream failed, fallback to staged path: %v", err)
+	}
+
 	remotePath, err := stageForNapcat(cfg, filePath)
 	if err != nil {
 		log.Printf("stage file failed: %v", err)
 		return false
 	}
 	defer cleanupRemote(cfg, remotePath)
-	fileURL := "file://" + filepath.Join(cfg.DockerPath, filepath.Base(remotePath))
-	params := copyMap(baseParams)
-	params["message"] = []map[string]any{{"type": "file", "data": map[string]any{"file": fileURL}}}
-	_, err = c.send(action, params, echo("file", time.Now().UnixNano()), 120*time.Second)
-	if err != nil {
-		log.Printf("send file failed: %v", err)
+	dockerPath := filepath.Join(cfg.DockerPath, filepath.Base(remotePath))
+	fileRefs := []string{
+		remotePath,
+		"file://" + remotePath,
+		dockerPath,
+		"file://" + dockerPath,
+	}
+
+	ok, lastErr := c.tryPrimarySendRefs(action, baseParams, fileRefs)
+	if ok {
+		return true
+	}
+	if c.tryUploadFileFallback(action, baseParams, fileRefs, filepath.Base(filePath)) {
+		return true
+	}
+	log.Printf("send file failed: %v", lastErr)
+	return false
+}
+
+func (c *NapcatClient) tryPrimarySendRefs(action string, baseParams map[string]any, fileRefs []string) (bool, error) {
+	var lastErr error
+	for _, ref := range fileRefs {
+		params := copyMap(baseParams)
+		params["message"] = []map[string]any{{"type": "file", "data": map[string]any{"file": ref}}}
+		_, err := c.send(action, params, echo("file", time.Now().UnixNano()), 120*time.Second)
+		if err == nil {
+			log.Printf("send file primary action success ref=%s", ref)
+			return true, nil
+		}
+		lastErr = err
+		log.Printf("send file primary action failed ref=%s err=%v", ref, err)
+		if !isRichMediaTransferErr(err) {
+			break
+		}
+	}
+	return false, lastErr
+}
+
+func isRichMediaTransferErr(err error) bool {
+	if err == nil {
 		return false
 	}
-	return true
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "rich media transfer failed") || strings.Contains(msg, "retcode:1200")
+}
+
+func (c *NapcatClient) tryUploadFileFallback(sendAction string, baseParams map[string]any, fileRefs []string, fileName string) bool {
+	action := ""
+	params := map[string]any{}
+	switch sendAction {
+	case "send_group_msg":
+		action = "upload_group_file"
+		groupID := toInt64(baseParams["group_id"])
+		if groupID <= 0 {
+			return false
+		}
+		params["group_id"] = groupID
+	case "send_private_msg":
+		action = "upload_private_file"
+		userID := toInt64(baseParams["user_id"])
+		if userID <= 0 {
+			return false
+		}
+		params["user_id"] = userID
+	default:
+		return false
+	}
+	params["name"] = fileName
+
+	for _, fileArg := range fileRefs {
+		req := copyMap(params)
+		req["file"] = fileArg
+		_, err := c.send(action, req, echo("file_upload_fallback", time.Now().UnixNano()), 120*time.Second)
+		if err == nil {
+			log.Printf("file upload fallback success action=%s file=%s", action, fileArg)
+			return true
+		}
+		log.Printf("file upload fallback failed action=%s file=%s err=%v", action, fileArg, err)
+	}
+	return false
 }
 
 func (c *NapcatClient) send(action string, params map[string]any, echoValue string, timeout time.Duration) (map[string]any, error) {
@@ -3003,6 +3722,15 @@ func (c *NapcatClient) send(action string, params map[string]any, echoValue stri
 		log.Printf("[local-test] action=%s echo=%s", action, echoValue)
 		return map[string]any{"status": "ok", "echo": echoValue}, nil
 	}
+	conn, err := c.openWS()
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return c.sendOnConn(conn, action, params, echoValue, timeout)
+}
+
+func (c *NapcatClient) openWS() (*websocket.Conn, error) {
 	h := http.Header{}
 	if c.token != "" {
 		h.Set("Authorization", "Bearer "+c.token)
@@ -3011,8 +3739,10 @@ func (c *NapcatClient) send(action string, params map[string]any, echoValue stri
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
+	return conn, nil
+}
 
+func (c *NapcatClient) sendOnConn(conn *websocket.Conn, action string, params map[string]any, echoValue string, timeout time.Duration) (map[string]any, error) {
 	payload := map[string]any{"action": action, "params": params, "echo": echoValue}
 	b, _ := json.Marshal(payload)
 	if err := conn.WriteMessage(websocket.TextMessage, b); err != nil {
@@ -3038,8 +3768,98 @@ func (c *NapcatClient) send(action string, params map[string]any, echoValue stri
 	}
 }
 
+func (c *NapcatClient) uploadFileStream(filePath string, timeout time.Duration) (string, error) {
+	st, err := os.Stat(filePath)
+	if err != nil {
+		return "", err
+	}
+	if st.IsDir() {
+		return "", errors.New("upload_file_stream path is directory")
+	}
+	fileSize := st.Size()
+	if fileSize <= 0 {
+		return "", errors.New("upload_file_stream empty file")
+	}
+
+	expectedSHA256, err := fileSHA256(filePath)
+	if err != nil {
+		return "", err
+	}
+
+	const chunkSize = 64 * 1024
+	totalChunks := int((fileSize + chunkSize - 1) / chunkSize)
+	streamID := fmt.Sprintf("stream_%d_%d", time.Now().UnixNano(), randIntN(1_000_000))
+
+	conn, err := c.openWS()
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	buf := make([]byte, chunkSize)
+	for idx := 0; idx < totalChunks; idx++ {
+		n, readErr := io.ReadFull(f, buf)
+		if readErr != nil && !errors.Is(readErr, io.EOF) && !errors.Is(readErr, io.ErrUnexpectedEOF) {
+			return "", readErr
+		}
+		if n <= 0 {
+			return "", fmt.Errorf("upload_file_stream read empty chunk idx=%d", idx)
+		}
+		chunkData := base64.StdEncoding.EncodeToString(buf[:n])
+		params := map[string]any{
+			"stream_id":       streamID,
+			"chunk_data":      chunkData,
+			"chunk_index":     idx,
+			"total_chunks":    totalChunks,
+			"file_size":       fileSize,
+			"expected_sha256": expectedSHA256,
+			"filename":        filepath.Base(filePath),
+			"file_retention":  10 * 60 * 1000,
+		}
+		if _, err := c.sendOnConn(conn, "upload_file_stream", params, echo("file_stream_chunk", idx), timeout); err != nil {
+			return "", err
+		}
+		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+			break
+		}
+	}
+
+	resp, err := c.sendOnConn(conn, "upload_file_stream", map[string]any{
+		"stream_id":   streamID,
+		"is_complete": true,
+	}, echo("file_stream_complete", time.Now().UnixNano()), timeout)
+	if err != nil {
+		return "", err
+	}
+	filePathOut := strings.TrimSpace(toString(mapGet(resp, "data")["file_path"]))
+	if filePathOut == "" {
+		return "", fmt.Errorf("upload_file_stream returned empty file_path: %v", resp)
+	}
+	log.Printf("upload_file_stream success stream_id=%s file_path=%s", streamID, filePathOut)
+	return filePathOut, nil
+}
+
+func fileSHA256(filePath string) (string, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
 func stageForNapcat(cfg Config, localFile string) (string, error) {
-	remote := filepath.Join(cfg.RemoteTempDir, filepath.Base(localFile))
+	remote := filepath.Join(cfg.RemoteTempDir, stagedRemoteName(localFile))
 	if strings.ToLower(cfg.TransferMode) == "local" {
 		raw, err := os.ReadFile(localFile)
 		if err != nil {
@@ -3058,6 +3878,14 @@ func stageForNapcat(cfg Config, localFile string) (string, error) {
 		return "", fmt.Errorf("scp failed: %v: %s", err, string(out))
 	}
 	return remote, nil
+}
+
+func stagedRemoteName(localFile string) string {
+	ext := strings.ToLower(filepath.Ext(localFile))
+	if ext == "" {
+		ext = ".bin"
+	}
+	return fmt.Sprintf("jm_%d%s", time.Now().UnixNano(), ext)
 }
 
 func cleanupRemote(cfg Config, remotePath string) {

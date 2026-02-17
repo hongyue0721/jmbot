@@ -3,6 +3,9 @@
 admin_id: 100000001 # 管理员QQ号
 http_host: "0.0.0.0" # HTTP监听Host
 http_port: 8071 # HTTP监听端口
+preview_host: "::" # CBZ预览服务监听Host（IPv6建议::）
+preview_port: 3502 # CBZ预览服务端口，访问 jm.zuichen.top:3502/JM号
+preview_public_base_url: "https://jm.zuichen.top:3502" # 发送失败时补发的在线预览链接前缀
 websocket_url: ws://10.0.0.101:13001 # WebSocket地址
 websocket_token: '1' # WebSocket鉴权Token
 file_dir: ./pdf/ # PDF文件目录

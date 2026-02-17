@@ -64,6 +64,8 @@
 
 关键配置项（建议优先检查）：
 - `http_host` / `http_port`：NapCat 回调监听地址
+- `preview_host` / `preview_port`：本地 CBZ 预览服务地址（默认 `::` / `3502`，支持 `http://域名:3502/350234`）
+- `preview_public_base_url`：文件发送失败时补发的在线预览链接前缀（可填 `https://jm.zuichen.top:3502`）
 - `http_port_fallback`：主端口是否自动退避（默认 `false`，建议保持）
 - `websocket_url` / `websocket_token`：NapCat WS 发送通道
 - `transfer_mode`：默认建议 `local`
