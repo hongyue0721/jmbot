@@ -568,20 +568,87 @@ func previewHomeHTML() string {
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>JM 本地预览</title>
 <style>
-body{margin:0;background:#0f1115;color:#e6e8eb;font-family:ui-sans-serif,system-ui,-apple-system;padding:20px}
-.wrap{max-width:980px;margin:0 auto}
-input{width:100%;padding:12px 14px;border-radius:10px;border:1px solid #2a2f38;background:#131722;color:#fff;font-size:16px}
-.list{margin-top:16px;display:grid;gap:10px}
-.item{padding:12px;border:1px solid #2a2f38;border-radius:10px;background:#131722;display:flex;justify-content:space-between;gap:8px}
-a{color:#8ab4ff;text-decoration:none}
-.meta{opacity:.75;font-size:12px}
+:root{
+  --text:#0f172a;
+  --muted:#64748b;
+  --glass:rgba(255,255,255,.68);
+  --glass-border:rgba(255,255,255,.84);
+  --line:#d9e2ee;
+  --bg:#f4f7fb;
+  --accent:#0a84ff;
+}
+*{box-sizing:border-box}
+body{
+  margin:0;
+  color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  background:
+    radial-gradient(1200px 800px at -10% -10%, #dbeafe 0%, transparent 55%),
+    radial-gradient(900px 640px at 110% 0%, #e0e7ff 0%, transparent 60%),
+    linear-gradient(180deg,#f8fafc 0%,#eef2f7 100%);
+}
+.wrap{max-width:980px;margin:0 auto;padding:18px 14px 28px}
+.hero{
+  border:1px solid var(--glass-border);
+  border-radius:22px;
+  background:var(--glass);
+  backdrop-filter:saturate(170%) blur(22px);
+  -webkit-backdrop-filter:saturate(170%) blur(22px);
+  box-shadow:0 12px 34px rgba(15,23,42,.1);
+  padding:18px;
+}
+h2{margin:0 0 10px;font-size:26px;letter-spacing:.2px}
+.sub{margin:0 0 14px;color:var(--muted);font-size:13px}
+input{
+  width:100%;
+  padding:12px 14px;
+  border-radius:14px;
+  border:1px solid var(--line);
+  background:#fff;
+  color:var(--text);
+  font-size:16px;
+  outline:none;
+}
+input:focus{
+  border-color:#9fc6ff;
+  box-shadow:0 0 0 4px rgba(10,132,255,.12);
+}
+.list{margin-top:14px;display:grid;gap:10px}
+.item{
+  padding:12px;
+  border:1px solid var(--line);
+  border-radius:14px;
+  background:var(--bg);
+  display:flex;
+  justify-content:space-between;
+  gap:8px;
+  align-items:center;
+}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+.meta{color:var(--muted);font-size:12px;margin-top:4px}
+.dl{
+  border:1px solid #b8d7ff;
+  border-radius:999px;
+  padding:6px 10px;
+  background:rgba(10,132,255,.08);
+}
+@media (max-width:680px){
+  .wrap{padding:12px 10px 20px}
+  .hero{padding:14px;border-radius:16px}
+  h2{font-size:22px}
+  .item{flex-direction:column;align-items:flex-start}
+}
 </style>
 </head>
 <body>
 <div class="wrap">
+  <div class="hero">
   <h2>JM 本地 CBZ 预览</h2>
+  <p class="sub">输入 JM 号或关键词，快速打开阅读页面</p>
   <input id="q" placeholder="输入 JM 号或标题关键词，例如 350234" />
   <div id="list" class="list"></div>
+  </div>
 </div>
 <script>
 const q = document.getElementById('q');
@@ -597,7 +664,7 @@ async function load(){
       '<div><a href="/' + it.id + '">JM' + it.id + '</a> - ' + it.title + '</div>' +
       '<div class="meta">' + it.name + ' · ' + (it.size/1024/1024).toFixed(2) + 'MB</div>' +
       '</div>' +
-      '<div><a href="/api/comic/' + it.id + '/download">下载</a></div>' +
+      '<div><a class="dl" href="/api/comic/' + it.id + '/download">下载</a></div>' +
       '</div>';
   }).join('');
 }
@@ -618,30 +685,135 @@ func previewViewerHTML(id string) string {
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>JM` + id + ` 预览</title>
 <style>
-body{margin:0;background:#0b0d10;color:#eef2f6;font-family:ui-sans-serif,system-ui,-apple-system}
-.bar{position:fixed;left:0;right:0;top:0;height:52px;background:#121722;border-bottom:1px solid #2e3644;display:flex;align-items:center;padding:0 10px;gap:8px;z-index:10}
-.btn{background:#1f2633;color:#fff;border:1px solid #354056;border-radius:8px;padding:7px 10px;cursor:pointer}
-.title{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.viewer{padding-top:56px;height:calc(100vh - 56px);display:flex;align-items:center;justify-content:center}
-img{max-width:100%;max-height:calc(100vh - 68px);object-fit:contain}
+:root{
+  --text:#0f172a;
+  --muted:#475569;
+  --glass:rgba(255,255,255,.66);
+  --glass-border:rgba(255,255,255,.82);
+  --btn:#f8fafc;
+  --btn-border:#d6deea;
+  --btn-hover:#f1f5f9;
+  --accent:#0a84ff;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  background:
+    radial-gradient(1200px 800px at -10% -10%, #dbeafe 0%, transparent 55%),
+    radial-gradient(900px 600px at 110% 0%, #e0e7ff 0%, transparent 60%),
+    linear-gradient(180deg,#f8fafc 0%,#eef2f7 100%);
+}
+.shell{
+  min-height:100%;
+  padding:18px 16px 18px;
+}
+.bar{
+  position:sticky;
+  top:0;
+  margin:0 auto;
+  max-width:1200px;
+  min-height:62px;
+  border:1px solid var(--glass-border);
+  border-radius:18px;
+  background:var(--glass);
+  backdrop-filter:saturate(170%) blur(22px);
+  -webkit-backdrop-filter:saturate(170%) blur(22px);
+  box-shadow:0 10px 30px rgba(15,23,42,.12);
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:8px;
+  z-index:10;
+}
+.btn{
+  appearance:none;
+  text-decoration:none;
+  background:var(--btn);
+  color:var(--text);
+  border:1px solid var(--btn-border);
+  border-radius:999px;
+  padding:8px 13px;
+  line-height:1;
+  font-size:14px;
+  cursor:pointer;
+  transition:all .18s ease;
+}
+.btn:hover{background:var(--btn-hover);border-color:#c7d2e2}
+.btn:active{transform:translateY(1px) scale(.99)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.title{
+  flex:1;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  color:#0f172a;
+  font-weight:600;
+  letter-spacing:.2px;
+  min-width:120px;
+}
+.badge{
+  font-size:12px;
+  color:var(--muted);
+  border-radius:999px;
+  border:1px solid #d8e0eb;
+  background:rgba(255,255,255,.8);
+  padding:5px 9px;
+}
+.viewer{
+  max-width:1200px;
+  margin:14px auto 0;
+  min-height:calc(100vh - 112px);
+  border-radius:24px;
+  border:1px solid rgba(255,255,255,.86);
+  background:rgba(255,255,255,.46);
+  box-shadow:0 18px 42px rgba(15,23,42,.1), inset 0 1px 0 rgba(255,255,255,.75);
+  backdrop-filter:blur(4px);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:16px;
+}
+img{
+  max-width:100%;
+  max-height:calc(100vh - 168px);
+  object-fit:contain;
+  border-radius:16px;
+  box-shadow:0 10px 40px rgba(15,23,42,.15);
+  transition:transform .2s ease, box-shadow .2s ease;
+}
+img:hover{transform:translateY(-1px);box-shadow:0 14px 44px rgba(15,23,42,.18)}
+@media (max-width:720px){
+  .shell{padding:10px}
+  .bar{border-radius:14px;padding:7px;gap:6px;flex-wrap:wrap}
+  .title{order:10;flex-basis:100%}
+  .viewer{border-radius:16px;min-height:calc(100vh - 156px)}
+  img{max-height:calc(100vh - 220px)}
+}
 </style>
 </head>
 <body>
+<div class="shell">
 <div class="bar">
   <button class="btn" id="back">返回</button>
   <button class="btn" id="prev">上一页</button>
-  <button class="btn" id="next">下一页</button>
+  <button class="btn primary" id="next">下一页</button>
   <button class="btn" id="fullscreen">全屏</button>
   <a class="btn" id="download" href="#">下载</a>
   <div class="title" id="title">加载中...</div>
+  <div class="badge" id="badge">第 1 / 1 页</div>
 </div>
 <div class="viewer"><img id="img" alt="page"/></div>
+</div>
 <script>
 const state = ` + string(b) + `;
 let page = 1;
 let total = 1;
 const img = document.getElementById('img');
 const title = document.getElementById('title');
+const badge = document.getElementById('badge');
 async function init(){
   const r = await fetch('/api/comic/' + state.id);
   if (!r.ok) {
@@ -665,6 +837,7 @@ function render(){
   if (page > total) page = total;
   img.src = '/api/comic/' + state.id + '/page/' + page;
   title.textContent = title.textContent.split(' ｜ ')[0] + ' ｜ 第 ' + page + ' / ' + total + ' 页';
+  badge.textContent = '第 ' + page + ' / ' + total + ' 页';
 }
 document.getElementById('prev').onclick = () => { page--; render(); };
 document.getElementById('next').onclick = () => { page++; render(); };
