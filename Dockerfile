@@ -23,6 +23,7 @@ RUN apt-get update \
        chromium \
        fonts-noto-cjk \
        zip \
+       qpdf \
        openssh-client \
     && rm -rf /var/lib/apt/lists/*
 

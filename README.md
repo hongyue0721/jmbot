@@ -38,7 +38,7 @@
 - `/jm goodluck`：随机本子
 - `/jm mode pdf|zip`：发送格式
 - `/jm enc on|off`、`/jm passwd <密码>`、`/jm randpwd on|off`
-- `/jm fname jm|full`：文件命名
+- `/jm fname jm|full|current`：文件命名（`current`=保持旧规则）
 - `/jm regex on|off`：正则提取模式
 
 ### 2.2 识图联动

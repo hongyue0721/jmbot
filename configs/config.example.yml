@@ -68,9 +68,9 @@ send_mode_global: pdf
 send_mode_group:
     '100000003': pdf
     '100000004': zip
-send_name_mode_global: full
+send_name_mode_global: full # full/jm/current（current=保持旧规则）
 send_name_mode_group:
-    '100000003': jm
+    '100000003': jm # full/jm/current
 
 # 加密配置
 enc_enabled_global: false

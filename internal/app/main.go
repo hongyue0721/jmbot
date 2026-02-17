@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -128,6 +129,9 @@ type App struct {
 
 	soutuMu    sync.Mutex
 	soutuArmed map[string]time.Time
+
+	bulkMu     sync.Mutex
+	bulkStates map[string]*bulkBatchState
 }
 
 type PendingSearch struct {
@@ -144,6 +148,26 @@ type DownloadTask struct {
 	Scope       string
 	Uploader    string
 	Bulk        bool
+	BatchID     string
+	BatchTotal  int
+	BatchIndex  int
+}
+
+type bulkTaskResult struct {
+	BatchIndex int
+	Number     string
+	Message    string
+	FilePath   string
+	Cleanup    []string
+	FailMsg    string
+}
+
+type bulkBatchState struct {
+	MessageType string
+	GroupID     int64
+	UserID      int64
+	Total       int
+	Results     []bulkTaskResult
 }
 
 type Album struct {
@@ -386,6 +410,7 @@ func NewApp(configPath, configExamplePath string) (*App, error) {
 		search:     map[string]PendingSearch{},
 		jmEnabled:  true,
 		soutuArmed: map[string]time.Time{},
+		bulkStates: map[string]*bulkBatchState{},
 	}
 	app.jm.SetCBZOptions(cfg.CBZChapterEnabled, cfg.CBZSeriesEnabled)
 	return app, nil
@@ -536,14 +561,15 @@ func fillDefaults(cfg *Config) {
 	if cfg.SendModeGlobal == "" {
 		cfg.SendModeGlobal = "pdf"
 	}
-	if cfg.SendNameModeGlobal == "" {
-		cfg.SendNameModeGlobal = "full"
-	}
+	cfg.SendNameModeGlobal = normalizeSendNameMode(cfg.SendNameModeGlobal)
 	if cfg.SendModeGroup == nil {
 		cfg.SendModeGroup = map[string]string{}
 	}
 	if cfg.SendNameModeGroup == nil {
 		cfg.SendNameModeGroup = map[string]string{}
+	}
+	for k, v := range cfg.SendNameModeGroup {
+		cfg.SendNameModeGroup[k] = normalizeSendNameMode(v)
 	}
 	if cfg.EncEnabledGroup == nil {
 		cfg.EncEnabledGroup = map[string]bool{}
@@ -1151,19 +1177,20 @@ func (a *App) handleMessageEvent(data map[string]any) {
 		a.sendMessage(messageType, groupID, userID, "发送格式已更新")
 		return
 	}
-	if m := mustMatch(`^/jm\s+fname\s+(jm|full)$`, rawMessage); m != nil {
+	if m := mustMatch(`^/jm\s+fname\s+(jm|full|current)$`, rawMessage); m != nil {
 		if !a.requireAdmin(messageType, groupID, userID, "仅管理员可设置发送文件命名方式") {
 			return
 		}
+		mode := normalizeSendNameMode(m[1])
 		a.cfgMu.Lock()
 		if messageType == "group" && groupID > 0 {
-			a.cfg.SendNameModeGroup[strconv.FormatInt(groupID, 10)] = m[1]
+			a.cfg.SendNameModeGroup[strconv.FormatInt(groupID, 10)] = mode
 		} else {
-			a.cfg.SendNameModeGlobal = m[1]
+			a.cfg.SendNameModeGlobal = mode
 		}
 		a.cfgMu.Unlock()
 		a.saveConfig()
-		a.sendMessage(messageType, groupID, userID, "发送文件命名方式已更新")
+		a.sendMessage(messageType, groupID, userID, "发送文件命名方式已更新："+mode)
 		return
 	}
 	if m := mustMatch(`^/jm\s+enc\s+(on|off)$`, rawMessage); m != nil {
@@ -1235,7 +1262,11 @@ func (a *App) handleMessageEvent(data map[string]any) {
 		return
 	}
 	if matched(`^/jm\s+goodluck$`, rawMessage) || matched(`^/goodluck$`, rawMessage) || rawMessage == "随机本子" {
-		id := randomJMID()
+		id, ok := a.randomExistingJMID()
+		if !ok {
+			a.sendMessage(messageType, groupID, userID, "随机本子失败：暂未找到可用本子，请稍后重试")
+			return
+		}
 		a.sendMessage(messageType, groupID, userID, "随机本子ID：JM"+id)
 		a.enqueueDownloads([]string{id}, messageType, groupID, userID, data)
 		return
@@ -1731,8 +1762,7 @@ func (a *App) enqueueDownloads(numbers []string, messageType string, groupID, us
 	}
 	cfg := a.currentConfig()
 	scope := requestScope(messageType, groupID, userID)
-	bulkRequested := len(numbers) > 1
-	queued := 0
+	accepted := make([]string, 0, len(numbers))
 	for _, n := range numbers {
 		if contains(cfg.BannedID, n) {
 			a.sendMessage(messageType, groupID, userID, "禁止下载或用户被封禁")
@@ -1745,8 +1775,32 @@ func (a *App) enqueueDownloads(numbers []string, messageType string, groupID, us
 			continue
 		}
 		a.markRequest(scope, n)
-		nickname := toString(mapGet(mapGet(data, "sender"), "nickname"))
-		task := DownloadTask{Number: n, MessageType: messageType, GroupID: groupID, UserID: userID, Scope: scope, Uploader: nickname, Bulk: bulkRequested}
+		accepted = append(accepted, n)
+	}
+	if len(accepted) == 0 {
+		return
+	}
+
+	bulkRequested := len(accepted) > 1
+	batchID := ""
+	if bulkRequested {
+		batchID = fmt.Sprintf("bulk_%d_%d_%d", time.Now().UnixNano(), groupID, userID)
+	}
+	nickname := toString(mapGet(mapGet(data, "sender"), "nickname"))
+	queued := 0
+	for idx, n := range accepted {
+		task := DownloadTask{
+			Number:      n,
+			MessageType: messageType,
+			GroupID:     groupID,
+			UserID:      userID,
+			Scope:       scope,
+			Uploader:    nickname,
+			Bulk:        bulkRequested,
+			BatchID:     batchID,
+			BatchTotal:  len(accepted),
+			BatchIndex:  idx,
+		}
 		select {
 		case a.queue <- task:
 			queued++
@@ -1767,6 +1821,27 @@ func (a *App) worker() {
 }
 
 func (a *App) processTask(task DownloadTask) {
+	result := bulkTaskResult{
+		BatchIndex: task.BatchIndex,
+		Number:     task.Number,
+	}
+	defer func() {
+		if !task.Bulk || strings.TrimSpace(task.BatchID) == "" || task.BatchTotal <= 1 {
+			return
+		}
+		a.finishBulkTask(task, result)
+	}()
+
+	notify := func(message string) {
+		if task.Bulk && strings.TrimSpace(task.BatchID) != "" && task.BatchTotal > 1 {
+			if result.FailMsg == "" {
+				result.FailMsg = message
+			}
+			return
+		}
+		a.sendMessage(task.MessageType, task.GroupID, task.UserID, message)
+	}
+
 	cfg := a.currentConfig()
 	sendMode := cfg.SendModeGlobal
 	if task.MessageType == "group" {
@@ -1780,6 +1855,7 @@ func (a *App) processTask(task DownloadTask) {
 			nameMode = v
 		}
 	}
+	nameMode = normalizeSendNameMode(nameMode)
 
 	encEnabled := cfg.EncEnabledGlobal
 	if task.MessageType == "group" {
@@ -1814,18 +1890,27 @@ func (a *App) processTask(task DownloadTask) {
 			}
 		}
 	}
+	if encEnabled && path == "" {
+		// Encryption mode still prefers existing local PDF to avoid redownloading.
+		path, name = findPDF(cfg.FileDir, task.Number, "")
+		if path != "" {
+			albumTitle = strings.TrimSpace(strings.TrimSuffix(name, filepath.Ext(name)))
+			needDownload = false
+			log.Printf("reuse local pdf for encrypted JM%s path=%s", task.Number, path)
+		}
+	}
 
-	if needDownload || encEnabled {
+	if needDownload {
 		album, err := a.jm.GetAlbum(ctx, task.Number)
 		if err != nil || album == nil {
 			if len(task.Number) < 4 {
 				return
 			}
-			a.sendMessage(task.MessageType, task.GroupID, task.UserID, "未能成功下载（可能ID错误或网络失败）")
+			notify("未能成功下载（可能ID错误或网络失败）")
 			return
 		}
 		if album.Episodes > cfg.MaxEpisodes {
-			a.sendMessage(task.MessageType, task.GroupID, task.UserID, fmt.Sprintf("本子章节过多(>%d)", cfg.MaxEpisodes))
+			notify(fmt.Sprintf("本子章节过多(>%d)", cfg.MaxEpisodes))
 			return
 		}
 		if strings.TrimSpace(albumTitle) == "" {
@@ -1834,14 +1919,16 @@ func (a *App) processTask(task DownloadTask) {
 		if needDownload {
 			path, name = findPDF(cfg.FileDir, task.Number, album.Title)
 			if path == "" {
-				a.sendMessage(task.MessageType, task.GroupID, task.UserID, "正在下载本子 "+task.Number)
+				if !(task.Bulk && strings.TrimSpace(task.BatchID) != "" && task.BatchTotal > 1) {
+					a.sendMessage(task.MessageType, task.GroupID, task.UserID, "正在下载本子 "+task.Number)
+				}
 				if err := a.jm.Download(ctx, task.Number); err != nil {
-					a.sendMessage(task.MessageType, task.GroupID, task.UserID, "下载失败或超时")
+					notify("下载失败或超时")
 					return
 				}
 				path, name = findPDF(cfg.FileDir, task.Number, album.Title)
 				if path == "" {
-					a.sendMessage(task.MessageType, task.GroupID, task.UserID, "下载完成但未找到PDF文件")
+					notify("下载完成但未找到PDF文件")
 					return
 				}
 			}
@@ -1873,13 +1960,23 @@ func (a *App) processTask(task DownloadTask) {
 	}
 	if encEnabled {
 		if password == "" {
-			a.sendMessage(task.MessageType, task.GroupID, task.UserID, "未设置加密密码，请先使用 /jm passwd <密码> 设置")
+			notify("未设置加密密码，请先使用 /jm passwd <密码> 设置")
 			return
 		}
 		encOut := filepath.Join(os.TempDir(), fmt.Sprintf("enc_%s_%d.pdf", task.Number, time.Now().UnixNano()))
-		if err := a.jm.DownloadTo(ctx, task.Number, encOut, password); err != nil {
-			a.sendMessage(task.MessageType, task.GroupID, task.UserID, "文件加密失败")
-			return
+		encrypted := false
+		if strings.EqualFold(filepath.Ext(sendPath), ".pdf") && fileExists(sendPath) {
+			if err := encryptPDFWithQPDF(sendPath, encOut, password); err == nil {
+				encrypted = true
+			} else {
+				log.Printf("local qpdf encryption failed for JM%s, fallback to remote: %v", task.Number, err)
+			}
+		}
+		if !encrypted {
+			if err := a.jm.DownloadTo(ctx, task.Number, encOut, password); err != nil {
+				notify("文件加密失败")
+				return
+			}
 		}
 		cleanup = append(cleanup, encOut)
 		sendPath = encOut
@@ -1888,7 +1985,7 @@ func (a *App) processTask(task DownloadTask) {
 	if sendMode == "zip" && !strings.EqualFold(filepath.Ext(sendPath), ".zip") && !strings.EqualFold(filepath.Ext(sendPath), ".cbz") {
 		zipPath, err := buildZip(sendPath)
 		if err != nil {
-			a.sendMessage(task.MessageType, task.GroupID, task.UserID, "文件压缩失败")
+			notify("文件压缩失败")
 			return
 		}
 		cleanup = append(cleanup, zipPath)
@@ -1899,18 +1996,27 @@ func (a *App) processTask(task DownloadTask) {
 	if nameMode == "jm" {
 		baseName = "JM" + task.Number
 	}
-	renamed, renamedCleanup, err := cloneWithName(sendPath, baseName)
-	if err == nil && renamed != sendPath {
-		sendPath = renamed
-		if renamedCleanup {
-			cleanup = append(cleanup, renamed)
+	if encEnabled && strings.TrimSpace(password) != "" {
+		baseName = fmt.Sprintf("%s_%s", baseName, sanitizeFileName(password))
+	}
+	if nameMode == "jm" || nameMode == "full" {
+		renamed, renamedCleanup, err := cloneWithName(sendPath, baseName)
+		if err == nil && renamed != sendPath {
+			sendPath = renamed
+			if renamedCleanup {
+				cleanup = append(cleanup, renamed)
+			}
 		}
 	}
-
-	hashPath, hashCleanup, err := randomizeHash(sendPath)
-	if err == nil && hashCleanup {
-		sendPath = hashPath
-		cleanup = append(cleanup, hashPath)
+	if nameMode == "current" {
+		ext := strings.ToLower(filepath.Ext(sendPath))
+		if ext == ".zip" || ext == ".cbz" {
+			hashPath, hashCleanup, err := randomizeHash(sendPath)
+			if err == nil && hashCleanup {
+				sendPath = hashPath
+				cleanup = append(cleanup, hashPath)
+			}
+		}
 	}
 
 	sizeMB := fileSizeMB(sendPath)
@@ -1922,30 +2028,44 @@ func (a *App) processTask(task DownloadTask) {
 	if encEnabled {
 		msg += "\n密码：" + password
 	}
-	if task.Bulk {
-		a.sendBulkRecordMessage(task.MessageType, task.GroupID, task.UserID, msg)
+	if task.Bulk && strings.TrimSpace(task.BatchID) != "" && task.BatchTotal > 1 {
+		result.Message = msg
+		result.FilePath = sendPath
+		result.Cleanup = append(result.Cleanup, cleanup...)
 	} else {
 		a.sendMessage(task.MessageType, task.GroupID, task.UserID, msg)
-	}
-
-	ok := false
-	if task.MessageType == "group" {
-		ok = a.bot.SendGroupFile(cfg, task.GroupID, sendPath)
-	} else {
-		ok = a.bot.SendPrivateFile(cfg, task.UserID, sendPath)
-	}
-	if !ok {
-		failMsg := "文件发送失败"
-		if book, found, _ := a.findBookByID(task.Number); found && strings.TrimSpace(book.ID) != "" {
-			failMsg += "\n可在线预览/下载：" + a.previewPublicURL(book.ID)
+		ok := false
+		if task.MessageType == "group" {
+			ok = a.bot.SendGroupFile(cfg, task.GroupID, sendPath)
+		} else {
+			ok = a.bot.SendPrivateFile(cfg, task.UserID, sendPath)
 		}
-		a.sendMessage(task.MessageType, task.GroupID, task.UserID, failMsg)
-	}
-
-	for _, c := range cleanup {
-		_ = os.Remove(c)
+		if !ok {
+			failMsg := "文件发送失败\n可在线预览/下载：" + a.previewPublicURL(task.Number)
+			a.sendMessage(task.MessageType, task.GroupID, task.UserID, failMsg)
+		}
+		for _, c := range cleanup {
+			_ = os.Remove(c)
+		}
 	}
 	_ = name
+}
+
+func encryptPDFWithQPDF(inFile, outFile, password string) error {
+	if strings.TrimSpace(inFile) == "" || strings.TrimSpace(outFile) == "" || strings.TrimSpace(password) == "" {
+		return errors.New("invalid encrypt args")
+	}
+	if !fileExists(inFile) {
+		return fmt.Errorf("input file not found: %s", inFile)
+	}
+	if _, err := exec.LookPath("qpdf"); err != nil {
+		return err
+	}
+	cmd := exec.Command("qpdf", "--encrypt", password, password, "256", "--", inFile, outFile)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("qpdf encrypt failed: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func (a *App) sendMessage(messageType string, groupID, userID int64, message string) {
@@ -1979,6 +2099,94 @@ func (a *App) sendBulkRecordMessage(messageType string, groupID, userID int64, m
 		}
 	}
 	a.sendMessage(messageType, groupID, userID, message)
+}
+
+func (a *App) finishBulkTask(task DownloadTask, result bulkTaskResult) {
+	batchID := strings.TrimSpace(task.BatchID)
+	if batchID == "" || task.BatchTotal <= 1 {
+		return
+	}
+
+	a.bulkMu.Lock()
+	st := a.bulkStates[batchID]
+	if st == nil {
+		st = &bulkBatchState{
+			MessageType: task.MessageType,
+			GroupID:     task.GroupID,
+			UserID:      task.UserID,
+			Total:       task.BatchTotal,
+			Results:     make([]bulkTaskResult, 0, task.BatchTotal),
+		}
+		a.bulkStates[batchID] = st
+	}
+	st.Results = append(st.Results, result)
+	done := len(st.Results) >= st.Total
+	if done {
+		delete(a.bulkStates, batchID)
+	}
+	a.bulkMu.Unlock()
+
+	if !done {
+		return
+	}
+	a.flushBulkBatch(st)
+}
+
+func (a *App) flushBulkBatch(st *bulkBatchState) {
+	if st == nil || len(st.Results) == 0 {
+		return
+	}
+	sort.Slice(st.Results, func(i, j int) bool {
+		return st.Results[i].BatchIndex < st.Results[j].BatchIndex
+	})
+
+	lines := make([]string, 0, len(st.Results)*5+2)
+	files := make([]string, 0, len(st.Results))
+	cleanup := make([]string, 0, len(st.Results)*2)
+	okCount := 0
+	for _, r := range st.Results {
+		if r.FilePath != "" {
+			okCount++
+			files = append(files, r.FilePath)
+		}
+		cleanup = append(cleanup, r.Cleanup...)
+		if strings.TrimSpace(r.FailMsg) != "" {
+			lines = append(lines, fmt.Sprintf("JM%s：%s", r.Number, r.FailMsg))
+			continue
+		}
+		if strings.TrimSpace(r.Message) != "" {
+			lines = append(lines, r.Message)
+		}
+	}
+
+	summary := fmt.Sprintf("批量发送结果：成功 %d/%d", okCount, len(st.Results))
+	if len(lines) > 0 {
+		summary += "\n\n" + strings.Join(lines, "\n\n")
+	}
+
+	cfg := a.currentConfig()
+	sent := false
+	if cfg.ReplyAsCard {
+		if st.MessageType == "group" && st.GroupID > 0 {
+			sent = a.bot.SendGroupForwardBundle(cfg, st.GroupID, summary, files, cfg.CardUserID, cfg.CardNickname)
+		} else if st.MessageType == "private" && st.UserID > 0 {
+			sent = a.bot.SendPrivateForwardBundle(cfg, st.UserID, summary, files, cfg.CardUserID, cfg.CardNickname)
+		}
+	}
+	if !sent {
+		a.sendMessage(st.MessageType, st.GroupID, st.UserID, summary)
+		for _, f := range files {
+			if st.MessageType == "group" && st.GroupID > 0 {
+				_ = a.bot.SendGroupFile(cfg, st.GroupID, f)
+			} else if st.MessageType == "private" && st.UserID > 0 {
+				_ = a.bot.SendPrivateFile(cfg, st.UserID, f)
+			}
+		}
+	}
+
+	for _, c := range cleanup {
+		_ = os.Remove(c)
+	}
 }
 
 func (a *App) currentConfig() Config {
@@ -2286,6 +2494,24 @@ func randomJMID() string {
 	return b.String()
 }
 
+func (a *App) randomExistingJMID() (string, bool) {
+	const maxTry = 80
+	for i := 0; i < maxTry; i++ {
+		id := randomJMID()
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		album, err := a.jm.GetAlbum(ctx, id)
+		cancel()
+		if err != nil || album == nil {
+			continue
+		}
+		if strings.TrimSpace(album.ID) == "" && strings.TrimSpace(album.Title) == "" {
+			continue
+		}
+		return id, true
+	}
+	return "", false
+}
+
 func randIntN(n int) int {
 	if n <= 0 {
 		return 0
@@ -2393,7 +2619,11 @@ func buildZip(filePath string) (string, error) {
 
 func cloneWithName(filePath, baseName string) (string, bool, error) {
 	ext := filepath.Ext(filePath)
-	newPath := filepath.Join(os.TempDir(), fmt.Sprintf("%s_%d%s", sanitizeFileName(baseName), time.Now().UnixNano(), ext))
+	safeBase := sanitizeFileName(baseName)
+	newPath := filepath.Join(os.TempDir(), safeBase+ext)
+	if fileExists(newPath) {
+		newPath = filepath.Join(os.TempDir(), fmt.Sprintf("%s_%d%s", safeBase, time.Now().UnixNano(), ext))
+	}
 	raw, err := os.ReadFile(filePath)
 	if err != nil {
 		return filePath, false, err
@@ -2402,6 +2632,19 @@ func cloneWithName(filePath, baseName string) (string, bool, error) {
 		return filePath, false, err
 	}
 	return newPath, true, nil
+}
+
+func normalizeSendNameMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "jm":
+		return "jm"
+	case "full":
+		return "full"
+	case "current":
+		return "current"
+	default:
+		return "full"
+	}
 }
 
 func randomizeHash(filePath string) (string, bool, error) {
@@ -3263,7 +3506,7 @@ func helpMessage() string {
 		"7) /jm enc on|off：设置是否加密\n" +
 		"8) /jm passwd <密码>：设置加密密码\n" +
 		"9) /jm randpwd on|off：启用随机密码加密\n" +
-		"10) /jm fname jm|full：设置发送文件命名方式\n" +
+		"10) /jm fname jm|full|current：设置发送文件命名方式（current=旧规则）\n" +
 		"11) /jm regex on|off：设置正则模式\n" +
 		"12) /jm dedup show|set|clear：重复请求冷却管理（管理员）\n" +
 		"13) /jm cfg list|show|set：在线配置开关（管理员）\n" +
@@ -3476,6 +3719,121 @@ func (c *NapcatClient) SendPrivateForwardCardMessage(userID int64, message strin
 		"message": []map[string]any{node},
 	}, echo("private_forward_card", userID), 10*time.Second)
 	return err == nil
+}
+
+type preparedForwardFile struct {
+	candidates []string
+	cleanup    func()
+}
+
+func (c *NapcatClient) SendGroupForwardBundle(cfg Config, groupID int64, summary string, filePaths []string, senderID int64, nickname string) bool {
+	return c.sendForwardBundle(cfg, "send_group_forward_msg", map[string]any{"group_id": groupID}, summary, filePaths, senderID, nickname, echo("group_forward_bundle", groupID))
+}
+
+func (c *NapcatClient) SendPrivateForwardBundle(cfg Config, userID int64, summary string, filePaths []string, senderID int64, nickname string) bool {
+	return c.sendForwardBundle(cfg, "send_private_forward_msg", map[string]any{"user_id": userID}, summary, filePaths, senderID, nickname, echo("private_forward_bundle", userID))
+}
+
+func (c *NapcatClient) sendForwardBundle(cfg Config, action string, baseParams map[string]any, summary string, filePaths []string, senderID int64, nickname string, echoValue string) bool {
+	if c.dryRun {
+		log.Printf("[local-test] forward bundle action=%s files=%d", action, len(filePaths))
+		return true
+	}
+	if strings.TrimSpace(nickname) == "" {
+		nickname = "文件助手"
+	}
+	if senderID <= 0 {
+		senderID = 10000
+	}
+
+	prepared := make([]preparedForwardFile, 0, len(filePaths))
+	defer func() {
+		for _, p := range prepared {
+			if p.cleanup != nil {
+				p.cleanup()
+			}
+		}
+	}()
+
+	maxCandidates := 1
+	for _, p := range filePaths {
+		pf, err := c.prepareForwardFile(cfg, p)
+		if err != nil {
+			log.Printf("prepare forward file failed path=%s err=%v", p, err)
+			return false
+		}
+		if len(pf.candidates) == 0 {
+			return false
+		}
+		if len(pf.candidates) > maxCandidates {
+			maxCandidates = len(pf.candidates)
+		}
+		prepared = append(prepared, pf)
+	}
+
+	for idx := 0; idx < maxCandidates; idx++ {
+		nodes := make([]map[string]any, 0, len(prepared)+1)
+		nodes = append(nodes, map[string]any{
+			"type": "node",
+			"data": map[string]any{
+				"user_id":  senderID,
+				"nickname": nickname,
+				"content": []map[string]any{
+					{"type": "text", "data": map[string]any{"text": summary}},
+				},
+			},
+		})
+
+		for _, pf := range prepared {
+			ref := pf.candidates[len(pf.candidates)-1]
+			if idx < len(pf.candidates) {
+				ref = pf.candidates[idx]
+			}
+			nodes = append(nodes, map[string]any{
+				"type": "node",
+				"data": map[string]any{
+					"user_id":  senderID,
+					"nickname": nickname,
+					"content": []map[string]any{
+						{"type": "file", "data": map[string]any{"file": ref}},
+					},
+				},
+			})
+		}
+
+		params := copyMap(baseParams)
+		params["message"] = nodes
+		if _, err := c.send(action, params, echoValue, 120*time.Second); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *NapcatClient) prepareForwardFile(cfg Config, filePath string) (preparedForwardFile, error) {
+	if streamPath, err := c.uploadFileStream(filePath, 120*time.Second); err == nil && strings.TrimSpace(streamPath) != "" {
+		return preparedForwardFile{
+			candidates: []string{
+				streamPath,
+				"file://" + streamPath,
+			},
+			cleanup: nil,
+		}, nil
+	}
+	remotePath, err := stageForNapcat(cfg, filePath)
+	if err != nil {
+		return preparedForwardFile{}, err
+	}
+	dockerPath := filepath.Join(cfg.DockerPath, filepath.Base(remotePath))
+	return preparedForwardFile{
+		candidates: []string{
+			remotePath,
+			"file://" + remotePath,
+			dockerPath,
+			"file://" + dockerPath,
+		},
+		cleanup: func() { cleanupRemote(cfg, remotePath) },
+	}, nil
 }
 
 func buildJSONCardPayload(nickname, message string) string {
