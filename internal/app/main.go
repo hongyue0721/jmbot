@@ -385,6 +385,9 @@ func Main() {
 }
 
 func NewApp(configPath, configExamplePath string) (*App, error) {
+	// 初始化日志系统
+	initLogger()
+
 	if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) {
 		if writeErr := writeMinimalConfigTemplate(configPath); writeErr != nil {
 			// Fallback: if minimal template creation fails, try copying example.
@@ -463,6 +466,31 @@ local_ssh_key: ""
 docker_internal_path: "/app/.config/QQ/temp/"
 `
 	return os.WriteFile(configPath, []byte(tpl), 0o644)
+}
+
+func initLogger() {
+	// 确保logs目录存在
+	logDir := "./logs"
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		log.Printf("创建日志目录失败: %v", err)
+		return
+	}
+
+	// 生成日志文件名（按日期）
+	logFile := filepath.Join(logDir, fmt.Sprintf("bot_%s.log", time.Now().Format("2006-01-02")))
+
+	// 打开日志文件（追加模式）
+	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.Printf("打开日志文件失败: %v", err)
+		return
+	}
+
+	// 同时输出到文件和stdout
+	multiWriter := io.MultiWriter(os.Stdout, f)
+	log.SetOutput(multiWriter)
+	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+	log.Printf("日志系统初始化完成，日志文件: %s", logFile)
 }
 
 func fillDefaults(cfg *Config) {
@@ -1951,8 +1979,10 @@ func (a *App) processTask(task DownloadTask) {
 		}
 
 		// 哔咔升级策略：尝试用本子名在哔咔搜索，如果有匹配就用哔咔下载原画画质
+		log.Printf("[Bika] 检查哔咔升级条件: bika=%v, albumTitle='%s'", a.bika != nil, albumTitle)
 		if a.bika != nil && albumTitle != "" {
 			token := a.getBikaUserToken(task.UserID)
+			log.Printf("[Bika] 用户 %d token状态: %v", task.UserID, token != "")
 			if token != "" {
 				// 构建搜索关键词列表：原始标题、去除[]、去除()、都去除
 				searchKeywords := []string{albumTitle}
@@ -1977,22 +2007,30 @@ func (a *App) processTask(task DownloadTask) {
 					if keyword == "" {
 						continue
 					}
-					log.Printf("bika upgrade: searching for '%s' on bika", keyword)
+					log.Printf("[Bika] 搜索关键词: '%s'", keyword)
 					results, _, searchErr := a.bika.Search(keyword, 1, token)
-					if searchErr == nil && len(results) > 0 {
+					if searchErr != nil {
+						log.Printf("[Bika] 搜索失败: %v", searchErr)
+						continue
+					}
+					log.Printf("[Bika] 搜索结果: %d 条", len(results))
+					if len(results) > 0 {
 						bestMatch = &results[0]
-						log.Printf("bika upgrade: found match '%s' (ID: %s)", bestMatch.Title, bestMatch.ID)
+						log.Printf("[Bika] 找到匹配: '%s' (ID: %s)", bestMatch.Title, bestMatch.ID)
 						break
 					}
 				}
 
 				if bestMatch != nil {
 					// 找到匹配的哔咔漫画，使用哔咔下载
-					log.Printf("bika upgrade: downloading from bika: %s", bestMatch.ID)
+					log.Printf("[Bika] 开始从哔咔下载: %s", bestMatch.ID)
 					if !(task.Bulk && strings.TrimSpace(task.BatchID) != "" && task.BatchTotal > 1) {
 						a.sendMessage(task.MessageType, task.GroupID, task.UserID, fmt.Sprintf("哔咔升级：找到原画版 %s，正在从哔咔下载...", bestMatch.Title))
 					}
 					bikaCBZ, bikaErr := a.bikaDownloadComic(ctx, bestMatch.ID, "", task.MessageType, task.GroupID, task.UserID, token)
+					if bikaErr != nil {
+						log.Printf("[Bika] 下载失败: %v", bikaErr)
+					}
 					if bikaErr == nil && bikaCBZ != "" {
 						// 哔咔下载成功，使用哔咔的文件
 						path = bikaCBZ
@@ -2000,12 +2038,12 @@ func (a *App) processTask(task DownloadTask) {
 						albumTitle = bestMatch.Title
 						needDownload = false
 						downloadSource = "Bika"
-						log.Printf("bika upgrade: success, using bika file %s", bikaCBZ)
+						log.Printf("[Bika] 下载成功: %s", bikaCBZ)
 					} else {
-						log.Printf("bika upgrade: failed, falling back to jm: %v", bikaErr)
+						log.Printf("[Bika] 下载失败，回退到JM: %v", bikaErr)
 					}
 				} else {
-					log.Printf("bika upgrade: no match found on bika, using jm")
+					log.Printf("[Bika] 未找到匹配，使用JM下载")
 				}
 			}
 		}
