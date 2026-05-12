@@ -902,32 +902,44 @@ func (a *App) bikaDownloadAndSend(comicID, chapterStr string, messageType string
 		toDownload = chapters
 	}
 
+	// 并发下载章节
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 3) // 最多3个并发
+
 	for _, ch := range toDownload {
-		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("正在下载：%s 第%d话 %s", comic.Title, ch.Order, ch.Title))
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(ch BikaChapter) {
+			defer wg.Done()
+			defer func() { <-sem }()
 
-		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.DownloadTimeout)*time.Second)
-		result, err := a.bika.DownloadChapter(ctx, comicID, comic.Title, ch.Title, ch.Order, outputDir, token)
-		cancel()
+			a.sendMessage(messageType, groupID, userID, fmt.Sprintf("正在下载：%s 第%d话 %s", comic.Title, ch.Order, ch.Title))
 
-		if err != nil {
-			a.sendMessage(messageType, groupID, userID, fmt.Sprintf("下载失败：第%d话 %s - %v", ch.Order, ch.Title, err))
-			continue
-		}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.DownloadTimeout)*time.Second)
+			result, err := a.bika.DownloadChapter(ctx, comicID, comic.Title, ch.Title, ch.Order, outputDir, token)
+			cancel()
 
-		// 发送文件
-		ok := false
-		if messageType == "group" {
-			ok = a.bot.SendGroupFile(cfg, groupID, result)
-		} else {
-			ok = a.bot.SendPrivateFile(cfg, userID, result)
-		}
+			if err != nil {
+				a.sendMessage(messageType, groupID, userID, fmt.Sprintf("下载失败：第%d话 %s - %v", ch.Order, ch.Title, err))
+				return
+			}
 
-		if !ok {
-			failMsg := fmt.Sprintf("文件发送失败：%s 第%d话", comic.Title, ch.Order)
-			a.sendMessage(messageType, groupID, userID, failMsg)
-		}
+			// 发送文件
+			ok := false
+			if messageType == "group" {
+				ok = a.bot.SendGroupFile(cfg, groupID, result)
+			} else {
+				ok = a.bot.SendPrivateFile(cfg, userID, result)
+			}
+
+			if !ok {
+				failMsg := fmt.Sprintf("文件发送失败：%s 第%d话", comic.Title, ch.Order)
+				a.sendMessage(messageType, groupID, userID, failMsg)
+			}
+		}(ch)
 	}
 
+	wg.Wait()
 	a.sendMessage(messageType, groupID, userID, fmt.Sprintf("哔咔漫画下载完成：%s", comic.Title))
 }
 

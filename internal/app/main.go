@@ -117,6 +117,8 @@ type Config struct {
 	DailyRecommendHour    int     `yaml:"daily_recommend_hour"`
 	DailyRecommendMinute  int     `yaml:"daily_recommend_minute"`
 	DailyRecommendGroups  []int64 `yaml:"daily_recommend_groups"`
+
+	MaxConcurrentDownloads int `yaml:"max_concurrent_downloads"`
 }
 
 type App struct {
@@ -284,9 +286,16 @@ func Main() {
 		}
 	}
 
-	go app.worker()
-
+	// 启动多个worker支持并发下载
 	cfg := app.currentConfig()
+	workerCount := cfg.MaxConcurrentDownloads
+	if workerCount <= 0 {
+		workerCount = 3
+	}
+	for i := 0; i < workerCount; i++ {
+		go app.worker()
+	}
+
 	mainMux := http.NewServeMux()
 	mainMux.HandleFunc("/", app.handleHTTPEvent)
 	mainServer := &http.Server{Handler: mainMux}
