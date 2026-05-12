@@ -3620,6 +3620,7 @@ func unique(in []string) []string {
 
 func helpMessage() string {
 	return "使用说明：\n" +
+		"【JM漫画】\n" +
 		"1) /jm <ID>：下载并发送本子\n" +
 		"2) /jm look <ID>：查看本子信息\n" +
 		"3) /jm search <本子名>：搜索本子并下载（需确认）\n" +
@@ -3629,11 +3630,21 @@ func helpMessage() string {
 		"7) /jm enc on|off：设置是否加密\n" +
 		"8) /jm passwd <密码>：设置加密密码\n" +
 		"9) /jm randpwd on|off：启用随机密码加密\n" +
-		"10) /jm fname jm|full|current：设置发送文件命名方式（current=旧规则）\n" +
+		"10) /jm fname jm|full|current：设置发送文件命名方式\n" +
 		"11) /jm regex on|off：设置正则模式\n" +
 		"12) /jm dedup show|set|clear：重复请求冷却管理（管理员）\n" +
 		"13) /jm cfg list|show|set：在线配置开关（管理员）\n" +
-		"14) /jm help：查看帮助"
+		"14) /jm help：查看帮助\n\n" +
+		"【哔咔漫画】\n" +
+		"1) /bika on|off：启用/关闭哔咔（管理员）\n" +
+		"2) /bika login <邮箱> <密码>：登录哔咔账号\n" +
+		"3) /bika logout：退出当前账号\n" +
+		"4) /bika whoami：查看当前登录状态\n" +
+		"5) /bika search <关键词>：搜索漫画\n" +
+		"6) /bika look <ID>：查看漫画详情\n" +
+		"7) /bika dl <ID> [章节]：下载漫画\n" +
+		"8) /bika confirm <序号>：确认搜索结果下载\n" +
+		"9) /bika help：查看哔咔帮助"
 }
 
 func contains(list []string, v string) bool {
