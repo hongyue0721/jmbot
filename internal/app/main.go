@@ -148,9 +148,18 @@ type App struct {
 }
 
 type PendingSearch struct {
-	AlbumID string
-	Title   string
-	At      time.Time
+	AlbumID    string
+	Title      string
+	At         time.Time
+	AggResults []SearchResultItem
+}
+
+type SearchResultItem struct {
+	Source string   // "JM" 或 "Bika"
+	ID     string
+	Title  string
+	Author string
+	Tags   []string
 }
 
 type DownloadTask struct {
@@ -1450,22 +1459,170 @@ func (a *App) handleMessageEvent(data map[string]any) {
 		}
 		keyword := normalizeSearchKeyword(m[1])
 		a.sendMessage(messageType, groupID, userID, "正在搜索："+keyword+" ...")
+
+		// 聚合搜索：同时搜索哔咔和JM
+		var allResults []SearchResultItem
+
+		// 搜索哔咔
+		if a.bika != nil {
+			token := a.getBikaUserToken(userID)
+			if token != "" {
+				results, _, err := a.bika.Search(keyword, 1, token)
+				if err == nil && len(results) > 0 {
+					for _, r := range results {
+						allResults = append(allResults, SearchResultItem{
+							Source: "Bika",
+							ID:     r.ID,
+							Title:  r.Title,
+							Author: r.Author,
+							Tags:   r.Tags,
+						})
+					}
+				}
+			}
+		}
+
+		// 搜索JM
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
 		al, err := a.jm.SearchBestAlbum(ctx, keyword)
-		if err != nil || al == nil {
+		if err == nil && al != nil {
+			allResults = append(allResults, SearchResultItem{
+				Source: "JM",
+				ID:     al.ID,
+				Title:  al.Title,
+				Author: "",
+				Tags:   al.Tags,
+			})
+		}
+
+		if len(allResults) == 0 {
 			a.sendMessage(messageType, groupID, userID, "未找到相关本子")
 			return
 		}
+
+		// 缓存搜索结果
 		a.searchMu.Lock()
-		a.search[scope] = PendingSearch{AlbumID: al.ID, Title: al.Title, At: time.Now()}
+		a.search[scope] = PendingSearch{
+			AlbumID:  "",
+			Title:    "",
+			At:       time.Now(),
+			AggResults: allResults,
+		}
 		a.searchMu.Unlock()
-		a.sendRecordMessage(messageType, groupID, userID, fmt.Sprintf("找到最佳匹配：\nID：JM%s\n标题：%s\n是否下载？请在10分钟内回复“确认”", al.ID, al.Title))
+
+		// 显示结果
+		var lines []string
+		for i, r := range allResults {
+			if i >= 15 {
+				break
+			}
+			tags := strings.Join(r.Tags, ", ")
+			if len(tags) > 40 {
+				tags = tags[:40] + "..."
+			}
+			author := ""
+			if r.Author != "" {
+				author = " 作者：" + r.Author
+			}
+			lines = append(lines, fmt.Sprintf("%d. [%s] %s%s\n   标签：%s", i+1, r.Source, r.Title, author, tags))
+		}
+		msg := fmt.Sprintf("搜索结果（共%d条）：\n%s\n\n回复 确认 <序号> 下载（可批量：确认 1 2 3）", len(allResults), strings.Join(lines, "\n"))
+		a.sendRecordMessage(messageType, groupID, userID, msg)
 		return
 	}
 
 	// Bika 命令处理
 	if a.handleBikaCommand(rawMessage, messageType, groupID, userID, scope, data) {
+		return
+	}
+
+	// 处理聚合搜索的确认命令
+	if m := mustMatch(`^确认\s+(.+)$`, rawMessage); m != nil {
+		a.searchMu.Lock()
+		pending, ok := a.search[scope]
+		if ok && time.Since(pending.At) > time.Duration(a.cfg.SearchTimeout)*time.Second {
+			delete(a.search, scope)
+			ok = false
+		}
+		a.searchMu.Unlock()
+
+		if !ok {
+			return
+		}
+
+		// 解析序号
+		parts := strings.Fields(m[1])
+		var indices []int
+		for _, p := range parts {
+			idx, err := strconv.Atoi(p)
+			if err != nil || idx <= 0 {
+				continue
+			}
+			indices = append(indices, idx)
+		}
+
+		if len(indices) == 0 {
+			return
+		}
+
+		// 处理聚合搜索结果
+		if len(pending.AggResults) > 0 {
+			// 检查序号范围
+			var validItems []SearchResultItem
+			for _, idx := range indices {
+				if idx > len(pending.AggResults) {
+					a.sendMessage(messageType, groupID, userID, fmt.Sprintf("序号 %d 超出范围，最大为 %d", idx, len(pending.AggResults)))
+					continue
+				}
+				validItems = append(validItems, pending.AggResults[idx-1])
+			}
+
+			if len(validItems) == 0 {
+				return
+			}
+
+			// 清除搜索缓存
+			a.searchMu.Lock()
+			delete(a.search, scope)
+			a.searchMu.Unlock()
+
+			// 逐个下载
+			if len(validItems) == 1 {
+				item := validItems[0]
+				a.sendMessage(messageType, groupID, userID, fmt.Sprintf("开始下载：%s [%s]", item.Title, item.Source))
+				if item.Source == "Bika" {
+					go a.bikaDownloadAndSend(item.ID, "", messageType, groupID, userID)
+				} else {
+					a.enqueueDownloads([]string{item.ID}, messageType, groupID, userID, data)
+				}
+			} else {
+				names := make([]string, len(validItems))
+				for i, item := range validItems {
+					names[i] = fmt.Sprintf("%s [%s]", item.Title, item.Source)
+				}
+				a.sendMessage(messageType, groupID, userID, fmt.Sprintf("开始下载 %d 个本子：\n%s", len(validItems), strings.Join(names, "\n")))
+				for _, item := range validItems {
+					if item.Source == "Bika" {
+						go a.bikaDownloadAndSend(item.ID, "", messageType, groupID, userID)
+					} else {
+						a.enqueueDownloads([]string{item.ID}, messageType, groupID, userID, data)
+					}
+				}
+			}
+			return
+		}
+
+		// 处理普通JM搜索结果（单个）
+		if len(indices) == 1 && indices[0] == 1 && pending.AlbumID != "" {
+			a.searchMu.Lock()
+			delete(a.search, scope)
+			a.searchMu.Unlock()
+			a.sendMessage(messageType, groupID, userID, "已确认，开始处理本子："+pending.Title)
+			a.enqueueDownloads([]string{pending.AlbumID}, messageType, groupID, userID, data)
+			return
+		}
+
 		return
 	}
 
