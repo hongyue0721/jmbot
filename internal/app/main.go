@@ -2074,6 +2074,11 @@ func (a *App) processTask(task DownloadTask) {
 		for _, c := range cleanup {
 			_ = os.Remove(c)
 		}
+		// 发送成功后删除原始PDF文件以节省空间（CBZ已保留）
+		if ok && strings.EqualFold(filepath.Ext(path), ".pdf") && fileExists(path) {
+			_ = os.Remove(path)
+			log.Printf("deleted original PDF after send: %s", path)
+		}
 	}
 	_ = name
 }
