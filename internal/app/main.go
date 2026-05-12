@@ -1952,12 +1952,36 @@ func (a *App) processTask(task DownloadTask) {
 		if a.bika != nil && albumTitle != "" {
 			token := a.getBikaUserToken(task.UserID)
 			if token != "" {
-				log.Printf("bika upgrade: searching for '%s' on bika", albumTitle)
-				results, _, searchErr := a.bika.Search(albumTitle, 1, token)
-				if searchErr == nil && len(results) > 0 {
+				// 构建搜索关键词列表：原始标题、去除[]、去除()
+				searchKeywords := []string{albumTitle}
+				cleaned1 := regexp.MustCompile(`\[.*?\]`).ReplaceAllString(albumTitle, "")
+				cleaned1 = strings.TrimSpace(cleaned1)
+				if cleaned1 != "" && cleaned1 != albumTitle {
+					searchKeywords = append(searchKeywords, cleaned1)
+				}
+				cleaned2 := regexp.MustCompile(`\(.*?\)`).ReplaceAllString(albumTitle, "")
+				cleaned2 = strings.TrimSpace(cleaned2)
+				if cleaned2 != "" && cleaned2 != albumTitle && cleaned2 != cleaned1 {
+					searchKeywords = append(searchKeywords, cleaned2)
+				}
+
+				var bestMatch *BikaSearchResult
+				for _, keyword := range searchKeywords {
+					if keyword == "" {
+						continue
+					}
+					log.Printf("bika upgrade: searching for '%s' on bika", keyword)
+					results, _, searchErr := a.bika.Search(keyword, 1, token)
+					if searchErr == nil && len(results) > 0 {
+						bestMatch = &results[0]
+						log.Printf("bika upgrade: found match '%s' (ID: %s)", bestMatch.Title, bestMatch.ID)
+						break
+					}
+				}
+
+				if bestMatch != nil {
 					// 找到匹配的哔咔漫画，使用哔咔下载
-					bestMatch := results[0]
-					log.Printf("bika upgrade: found match '%s' (ID: %s), downloading from bika", bestMatch.Title, bestMatch.ID)
+					log.Printf("bika upgrade: downloading from bika: %s", bestMatch.ID)
 					if !(task.Bulk && strings.TrimSpace(task.BatchID) != "" && task.BatchTotal > 1) {
 						a.sendMessage(task.MessageType, task.GroupID, task.UserID, fmt.Sprintf("哔咔升级：找到原画版 %s，正在从哔咔下载...", bestMatch.Title))
 					}
