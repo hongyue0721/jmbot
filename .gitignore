@@ -1,5 +1,7 @@
 .aider*
 config.yml
+config.yaml
+*.json
 logs/
 pdf/
 manga/
@@ -8,3 +10,7 @@ bin/napcat-jm-go
 option.yml
 venv/
 .venv/
+hy2_config.yaml
+install_hy2.sh
+xray_config.json
+update_xray.sh
