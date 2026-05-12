@@ -2,6 +2,7 @@
 
 一个面向 NapCat/OneBot 事件的 Go 机器人，提供：
 - `JM` 本子下载、检索、发送（PDF/ZIP）
+- `哔咔` 漫画源支持（原画下载、自动升级）
 - 识图（soutubot）联动检索并回填 `JM` 号
 - 文件加密、随机密码、命名策略、去重与队列控制
 - 内置/外置 Cloudflare bypass 对接
@@ -41,7 +42,25 @@
 - `/jm fname jm|full|current`：文件命名（`current`=保持旧规则）
 - `/jm regex on|off`：正则提取模式
 
-### 2.2 识图联动
+### 2.2 哔咔漫画源
+- `/bika on|off`：启用/关闭哔咔（管理员）
+- `/bika login <邮箱> <密码>`：登录哔咔账号
+- `/bika logout`：退出当前账号
+- `/bika whoami`：查看当前登录状态
+- `/bika search <关键词>`：搜索漫画
+- `/bika look <ID>`：查看漫画详情
+- `/bika dl <ID> [章节]`：下载漫画
+- `/bika confirm <序号>`：确认搜索结果下载
+- `/bika help`：查看哔咔帮助
+
+**自动升级策略**：当用户请求JM本子时，系统会自动在哔咔搜索匹配内容，如果找到就从哔咔下载原画版。
+
+**登录机制**：
+- 管理员登录后自动设为全局默认账号
+- 其他用户可登录自己的账号
+- 未登录用户使用全局账号
+
+### 2.3 识图联动
 - 识图成功后，会自动提取标题关键词（含中日文片段）并走 `/jm search` 同款检索逻辑
 - 命中后自动写入待确认队列，回复“确认”即可下载
 
@@ -75,6 +94,13 @@
 - `soutu_*`：识图请求参数
 - `cf_bypass_api_url`：外置 bypass 地址（推荐生产使用）
 - `embedded_bypass_enabled`：是否启用内置 bypass（需要本机 chrome/chromium）
+
+**哔咔配置**：
+- `bika_enabled`：是否启用哔咔（默认 `false`）
+- `bika_base_url`：哔咔 API 地址（默认 `https://picaapi.picacomic.com/`）
+- `bika_token`：登录 token（管理员登录后自动设置）
+- `bika_quality`：图片画质（`original` / `high` / `middle` / `low`）
+- `bika_proxy`：HTTP 代理（如 `http://127.0.0.1:1081`）
 
 ## 4. 运行方式
 
@@ -251,12 +277,20 @@ kill <pid>
 
 ## 9. 日志与调试
 
+日志文件保存在 `logs/` 目录，按日期命名：`logs/bot_2026-05-12.log`
+
 识图相关调试日志前缀：
 - `[soutu-debug] recv event`
 - `[soutu-debug] armed ...`
 - `[soutu-debug] extracted sources ...`
 - `[soutu-debug] get_image ...`
 - `[soutu-debug] search success ...`
+
+哔咔相关调试日志前缀：
+- `[Bika] 检查哔咔升级条件`
+- `[Bika] 搜索关键词`
+- `[Bika] 搜索结果`
+- `[Bika] 下载成功/失败`
 
 如果需要排障，建议贴出同一时段完整日志片段（含 group/user/scope 行）。
 
