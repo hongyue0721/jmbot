@@ -2074,10 +2074,13 @@ func (a *App) processTask(task DownloadTask) {
 		for _, c := range cleanup {
 			_ = os.Remove(c)
 		}
-		// 发送成功后删除原始PDF文件以节省空间（CBZ已保留）
-		if ok && strings.EqualFold(filepath.Ext(path), ".pdf") && fileExists(path) {
-			_ = os.Remove(path)
-			log.Printf("deleted original PDF after send: %s", path)
+		// 发送成功后删除原始PDF文件和manga目录以节省空间（CBZ已保留）
+		if ok {
+			if strings.EqualFold(filepath.Ext(path), ".pdf") && fileExists(path) {
+				_ = os.Remove(path)
+				log.Printf("deleted original PDF after send: %s", path)
+			}
+			a.deleteMangaDirByID(normalizeJMID(task.Number))
 		}
 	}
 	_ = name
@@ -2119,6 +2122,33 @@ func (a *App) buildEncryptedPDFFromLocalManga(number, outFile, password string) 
 		return false, err
 	}
 	return true, nil
+}
+
+func (a *App) deleteMangaDirByID(id string) {
+	cfg := a.currentConfig()
+	root := strings.TrimSpace(cfg.MangaDir)
+	if root == "" {
+		root = "./manga/"
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		dirID := extractIDFromName(name)
+		if dirID == id {
+			dirPath := filepath.Join(root, name)
+			if err := os.RemoveAll(dirPath); err != nil {
+				log.Printf("failed to delete manga dir %s: %v", dirPath, err)
+			} else {
+				log.Printf("deleted manga dir: %s", dirPath)
+			}
+		}
+	}
 }
 
 func (a *App) notifyAdminDownloadFailure(groupID int64, jmNumber, reason string) {
