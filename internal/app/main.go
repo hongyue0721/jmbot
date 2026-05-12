@@ -158,6 +158,7 @@ type bulkTaskResult struct {
 	Number     string
 	Message    string
 	FilePath   string
+	OrigPDF    string // 原始PDF路径，用于发送后删除
 	Cleanup    []string
 	FailMsg    string
 }
@@ -2058,6 +2059,7 @@ func (a *App) processTask(task DownloadTask) {
 	if task.Bulk && strings.TrimSpace(task.BatchID) != "" && task.BatchTotal > 1 {
 		result.Message = msg
 		result.FilePath = sendPath
+		result.OrigPDF = path
 		result.Cleanup = append(result.Cleanup, cleanup...)
 	} else {
 		a.sendMessage(task.MessageType, task.GroupID, task.UserID, msg)
@@ -2280,6 +2282,16 @@ func (a *App) flushBulkBatch(st *bulkBatchState) {
 
 	for _, c := range cleanup {
 		_ = os.Remove(c)
+	}
+	// 批量发送完成后删除原始PDF和manga目录以节省空间
+	for _, r := range st.Results {
+		if r.FilePath != "" && r.OrigPDF != "" {
+			if strings.EqualFold(filepath.Ext(r.OrigPDF), ".pdf") && fileExists(r.OrigPDF) {
+				_ = os.Remove(r.OrigPDF)
+				log.Printf("deleted original PDF after bulk send: %s", r.OrigPDF)
+			}
+			a.deleteMangaDirByID(normalizeJMID(r.Number))
+		}
 	}
 }
 
