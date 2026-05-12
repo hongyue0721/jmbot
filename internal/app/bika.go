@@ -445,29 +445,24 @@ func (b *BikaClient) DownloadChapter(ctx context.Context, comicID, comicTitle, e
 	}
 	sort.Strings(imageFiles)
 
-	// 生成PDF - 使用本子名命名
-	pdfPath := filepath.Join(filepath.Dir(epDir), comicTitle+".pdf")
-	if len(imageFiles) > 0 {
-		if err := buildPDF(pdfPath, imageFiles, ""); err != nil {
-			log.Printf("bika pdf build failed: %v", err)
-			// 回退到CBZ
-			cbzPath := filepath.Join(filepath.Dir(epDir), comicTitle+".cbz")
-			if err := zipDirToCBZ(epDir, cbzPath); err != nil {
-				return epDir, nil
-			}
-			os.RemoveAll(epDir)
-			return cbzPath, nil
-		}
-		os.RemoveAll(epDir)
-		return pdfPath, nil
-	}
-
-	// 没有图片，回退到CBZ
+	// 生成CBZ并保留
 	cbzPath := filepath.Join(filepath.Dir(epDir), comicTitle+".cbz")
 	if err := zipDirToCBZ(epDir, cbzPath); err != nil {
+		log.Printf("bika cbz build failed: %v", err)
 		return epDir, nil
 	}
 	os.RemoveAll(epDir)
+
+	// 同时生成PDF用于发送
+	if len(imageFiles) > 0 {
+		pdfPath := filepath.Join(filepath.Dir(epDir), comicTitle+".pdf")
+		if err := buildPDF(pdfPath, imageFiles, ""); err != nil {
+			log.Printf("bika pdf build failed: %v, using cbz", err)
+			return cbzPath, nil
+		}
+		return pdfPath, nil
+	}
+
 	return cbzPath, nil
 }
 
