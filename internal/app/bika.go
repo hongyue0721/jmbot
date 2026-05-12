@@ -528,6 +528,11 @@ func (a *App) getBikaUserToken(userID int64) string {
 }
 
 func (a *App) handleBikaCommand(rawMessage, messageType string, groupID, userID int64, scope string, data map[string]any) bool {
+	// 只处理 /bika 开头的命令
+	if !strings.HasPrefix(strings.TrimSpace(rawMessage), "/bika") {
+		return false
+	}
+
 	cfg := a.currentConfig()
 
 	// 检查 bika 是否启用
