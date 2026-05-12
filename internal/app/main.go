@@ -106,6 +106,12 @@ type Config struct {
 
 	LocalTestMode              bool `yaml:"local_test_mode"`
 	LocalTestExitAfterSelftest bool `yaml:"local_test_exit_after_selftest"`
+
+	BikaEnabled bool   `yaml:"bika_enabled"`
+	BikaBaseURL string `yaml:"bika_base_url"`
+	BikaToken   string `yaml:"bika_token"`
+	BikaQuality string `yaml:"bika_quality"`
+	BikaProxy   string `yaml:"bika_proxy"`
 }
 
 type App struct {
@@ -115,6 +121,8 @@ type App struct {
 
 	bot *NapcatClient
 	jm  *JMBridge
+
+	bika *BikaClient
 
 	queue chan DownloadTask
 
@@ -412,6 +420,9 @@ func NewApp(configPath, configExamplePath string) (*App, error) {
 		jmEnabled:  true,
 		soutuArmed: map[string]time.Time{},
 		bulkStates: map[string]*bulkBatchState{},
+	}
+	if cfg.BikaEnabled {
+		app.bika = NewBikaClient(getBikaConfig(cfg))
 	}
 	app.jm.SetCBZOptions(cfg.CBZChapterEnabled, cfg.CBZSeriesEnabled)
 	return app, nil
@@ -1369,6 +1380,12 @@ func (a *App) handleMessageEvent(data map[string]any) {
 		a.sendRecordMessage(messageType, groupID, userID, fmt.Sprintf("找到最佳匹配：\nID：JM%s\n标题：%s\n是否下载？请在10分钟内回复“确认”", al.ID, al.Title))
 		return
 	}
+
+	// Bika 命令处理
+	if a.handleBikaCommand(rawMessage, messageType, groupID, userID, scope, data) {
+		return
+	}
+
 	if rawMessage == "确认" {
 		a.searchMu.Lock()
 		pending, ok := a.search[scope]

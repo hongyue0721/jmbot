@@ -105,3 +105,10 @@ banned_id: []
 banned_user: []
 banned_group: []
 banned_tags: []
+
+# Bika 漫画源配置（可选）
+bika_enabled: false          # 是否启用 Bika 漫画源
+bika_base_url: "https://api.go2778.com/"  # Bika API 地址（默认使用代理）
+bika_token: ""               # Bika 登录 Token（登录后获取，可选）
+bika_quality: "original"     # 图片画质：original / high / middle / low
+bika_proxy: ""               # HTTP 代理（如 socks5://127.0.0.1:1080）
