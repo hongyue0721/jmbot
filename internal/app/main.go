@@ -1878,8 +1878,6 @@ func (a *App) processTask(task DownloadTask) {
 		a.finishBulkTask(task, result)
 	}()
 
-	downloadSource := "JM" // 标记下载来源：JM 或 Bika
-
 	notify := func(message string) {
 		if task.Bulk && strings.TrimSpace(task.BatchID) != "" && task.BatchTotal > 1 {
 			if result.FailMsg == "" {
@@ -1918,6 +1916,7 @@ func (a *App) processTask(task DownloadTask) {
 	name := ""
 	albumTitle := ""
 	needDownload := true
+	downloadSource := "JM" // 标记下载来源：JM 或 Bika
 
 	// Reuse locally downloaded files whenever possible.
 	if !encEnabled {
@@ -1956,34 +1955,22 @@ func (a *App) processTask(task DownloadTask) {
 		}
 	}
 
-	if needDownload {
-		album, err := a.jm.GetAlbum(ctx, task.Number)
-		if err != nil || album == nil {
-			if len(task.Number) < 4 {
-				return
+	// 哔咔升级策略：即使本地有文件，也尝试从哔咔下载原画版
+	log.Printf("[Bika] 检查哔咔升级条件: bika=%v, albumTitle='%s'", a.bika != nil, albumTitle)
+	if a.bika != nil {
+		token := a.getBikaUserToken(task.UserID)
+		log.Printf("[Bika] 用户 %d token状态: %v", task.UserID, token != "")
+		if token != "" {
+			// 如果没有标题，先获取
+			if albumTitle == "" || albumTitle == task.Number {
+				album2, err2 := a.jm.GetAlbum(ctx, task.Number)
+				if err2 == nil && album2 != nil {
+					albumTitle = strings.TrimSpace(album2.Title)
+					log.Printf("[Bika] 获取到本子标题: %s", albumTitle)
+				}
 			}
-			reason := "未能成功下载（可能ID错误或网络失败）"
-			if err != nil {
-				reason = fmt.Sprintf("获取本子信息失败: %v", err)
-			}
-			notify(reason)
-			a.notifyAdminDownloadFailure(task.GroupID, task.Number, reason)
-			return
-		}
-		if album.Episodes > cfg.MaxEpisodes {
-			notify(fmt.Sprintf("本子章节过多(>%d)", cfg.MaxEpisodes))
-			return
-		}
-		if strings.TrimSpace(albumTitle) == "" {
-			albumTitle = strings.TrimSpace(album.Title)
-		}
 
-		// 哔咔升级策略：尝试用本子名在哔咔搜索，如果有匹配就用哔咔下载原画画质
-		log.Printf("[Bika] 检查哔咔升级条件: bika=%v, albumTitle='%s'", a.bika != nil, albumTitle)
-		if a.bika != nil && albumTitle != "" {
-			token := a.getBikaUserToken(task.UserID)
-			log.Printf("[Bika] 用户 %d token状态: %v", task.UserID, token != "")
-			if token != "" {
+			if albumTitle != "" && albumTitle != task.Number {
 				// 构建搜索关键词列表：原始标题、去除[]、去除()、都去除
 				searchKeywords := []string{albumTitle}
 				cleaned1 := regexp.MustCompile(`\[.*?\]`).ReplaceAllString(albumTitle, "")
@@ -2045,28 +2032,55 @@ func (a *App) processTask(task DownloadTask) {
 				} else {
 					log.Printf("[Bika] 未找到匹配，使用JM下载")
 				}
+			} else {
+				log.Printf("[Bika] 标题为空或等于JM号，跳过哔咔升级")
 			}
+		} else {
+			log.Printf("[Bika] 用户未登录，跳过哔咔升级")
 		}
+	} else {
+		log.Printf("[Bika] 哔咔未启用，跳过哔咔升级")
+	}
 
-		if needDownload {
+	if needDownload {
+		path, name = findPDF(cfg.FileDir, task.Number, "")
+		if path == "" {
+			// 需要获取album信息
+			album, err := a.jm.GetAlbum(ctx, task.Number)
+			if err != nil || album == nil {
+				if len(task.Number) < 4 {
+					return
+				}
+				reason := "未能成功下载（可能ID错误或网络失败）"
+				if err != nil {
+					reason = fmt.Sprintf("获取本子信息失败: %v", err)
+				}
+				notify(reason)
+				a.notifyAdminDownloadFailure(task.GroupID, task.Number, reason)
+				return
+			}
+			if album.Episodes > cfg.MaxEpisodes {
+				notify(fmt.Sprintf("本子章节过多(>%d)", cfg.MaxEpisodes))
+				return
+			}
+			if albumTitle == "" {
+				albumTitle = strings.TrimSpace(album.Title)
+			}
+			if !(task.Bulk && strings.TrimSpace(task.BatchID) != "" && task.BatchTotal > 1) {
+				a.sendMessage(task.MessageType, task.GroupID, task.UserID, "正在下载本子 "+task.Number)
+			}
+			if err := a.jm.Download(ctx, task.Number); err != nil {
+				reason := fmt.Sprintf("下载失败或超时: %v", err)
+				notify("下载失败或超时")
+				a.notifyAdminDownloadFailure(task.GroupID, task.Number, reason)
+				return
+			}
 			path, name = findPDF(cfg.FileDir, task.Number, album.Title)
 			if path == "" {
-				if !(task.Bulk && strings.TrimSpace(task.BatchID) != "" && task.BatchTotal > 1) {
-					a.sendMessage(task.MessageType, task.GroupID, task.UserID, "正在下载本子 "+task.Number)
-				}
-				if err := a.jm.Download(ctx, task.Number); err != nil {
-					reason := fmt.Sprintf("下载失败或超时: %v", err)
-					notify("下载失败或超时")
-					a.notifyAdminDownloadFailure(task.GroupID, task.Number, reason)
-					return
-				}
-				path, name = findPDF(cfg.FileDir, task.Number, album.Title)
-				if path == "" {
-					reason := "下载完成但未找到PDF文件"
-					notify(reason)
-					a.notifyAdminDownloadFailure(task.GroupID, task.Number, reason)
-					return
-				}
+				reason := "下载完成但未找到PDF文件"
+				notify(reason)
+				a.notifyAdminDownloadFailure(task.GroupID, task.Number, reason)
+				return
 			}
 		}
 	}
