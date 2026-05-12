@@ -14,7 +14,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,7 +36,7 @@ type BikaClient struct {
 	baseURL string
 	token   string
 	quality string
-	client  *http.Client
+	proxy   string
 }
 
 type BikaConfig struct {
@@ -48,10 +47,11 @@ type BikaConfig struct {
 	Proxy   string `yaml:"proxy"`
 }
 
-type BikaAPIResponse struct {
-	Code    int             `json:"code"`
-	Message string          `json:"message"`
-	Data    json.RawMessage `json:"data"`
+type BikaUserToken struct {
+	Token   string    `json:"token"`
+	Name    string    `json:"name"`
+	Email   string    `json:"email"`
+	Expires time.Time `json:"expires"`
 }
 
 type BikaComic struct {
@@ -102,6 +102,18 @@ type BikaPageItem struct {
 	} `json:"media"`
 }
 
+type BikaPendingSearch struct {
+	Results []BikaSearchResult
+	At      time.Time
+}
+
+var (
+	bikaUserTokens   = make(map[int64]*BikaUserToken) // userID -> token
+	bikaUserTokensMu sync.RWMutex
+	bikaSearchCache  = make(map[string]BikaPendingSearch)
+	bikaSearchCacheMu sync.Mutex
+)
+
 func NewBikaClient(cfg BikaConfig) *BikaClient {
 	baseURL := cfg.BaseURL
 	if baseURL == "" {
@@ -112,41 +124,33 @@ func NewBikaClient(cfg BikaConfig) *BikaClient {
 		quality = "original"
 	}
 
-	client := &http.Client{Timeout: 60 * time.Second}
-	if cfg.Proxy != "" {
-		proxyURL, err := parseURL(cfg.Proxy)
-		if err == nil {
-			client.Transport = &http.Transport{Proxy: http.ProxyURL(proxyURL)}
-		}
-	}
-
 	return &BikaClient{
 		baseURL: baseURL,
 		token:   cfg.Token,
 		quality: quality,
-		client:  client,
+		proxy:   cfg.Proxy,
 	}
 }
 
-func parseURL(rawURL string) (*url.URL, error) {
-	return url.Parse(rawURL)
+func (b *BikaClient) getHTTPClient() *http.Client {
+	client := &http.Client{Timeout: 60 * time.Second}
+	if b.proxy != "" {
+		proxyURL, err := url.Parse(b.proxy)
+		if err == nil {
+			client.Transport = &http.Transport{Proxy: http.ProxyURL(proxyURL)}
+		}
+	}
+	return client
 }
 
-func (b *BikaClient) generateSignature(endpoint string, timestamp int64) string {
-	sigStr := strings.ToLower(endpoint + fmt.Sprintf("%d", timestamp) + bikaNonce + "GET" + bikaAPIKey)
+func (b *BikaClient) generateSignature(endpoint, method string, timestamp int64) string {
+	sigStr := strings.ToLower(endpoint + fmt.Sprintf("%d", timestamp) + bikaNonce + method + bikaAPIKey)
 	h := hmac.New(sha256.New, []byte(bikaSecretKey))
 	h.Write([]byte(sigStr))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func (b *BikaClient) generateSignaturePOST(endpoint string, timestamp int64) string {
-	sigStr := strings.ToLower(endpoint + fmt.Sprintf("%d", timestamp) + bikaNonce + "POST" + bikaAPIKey)
-	h := hmac.New(sha256.New, []byte(bikaSecretKey))
-	h.Write([]byte(sigStr))
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-func (b *BikaClient) makeRequest(method, endpoint string, body interface{}) ([]byte, error) {
+func (b *BikaClient) makeRequest(method, endpoint string, body interface{}, token string) ([]byte, error) {
 	var reqBody io.Reader
 	if body != nil {
 		jsonData, err := json.Marshal(body)
@@ -158,13 +162,7 @@ func (b *BikaClient) makeRequest(method, endpoint string, body interface{}) ([]b
 
 	fullURL := b.baseURL + endpoint
 	timestamp := time.Now().Unix()
-
-	var signature string
-	if method == "POST" {
-		signature = b.generateSignaturePOST(endpoint, timestamp)
-	} else {
-		signature = b.generateSignature(endpoint, timestamp)
-	}
+	signature := b.generateSignature(endpoint, method, timestamp)
 
 	req, err := http.NewRequest(method, fullURL, reqBody)
 	if err != nil {
@@ -184,7 +182,9 @@ func (b *BikaClient) makeRequest(method, endpoint string, body interface{}) ([]b
 	req.Header.Set("accept", "application/vnd.picacomic.com.v1+json")
 	req.Header.Set("User-Agent", "okhttp/3.8.1")
 
-	if b.token != "" {
+	if token != "" {
+		req.Header.Set("authorization", token)
+	} else if b.token != "" {
 		req.Header.Set("authorization", b.token)
 	}
 
@@ -192,7 +192,7 @@ func (b *BikaClient) makeRequest(method, endpoint string, body interface{}) ([]b
 		req.Header.Set("image-quality", b.quality)
 	}
 
-	resp, err := b.client.Do(req)
+	resp, err := b.getHTTPClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -206,13 +206,50 @@ func (b *BikaClient) makeRequest(method, endpoint string, body interface{}) ([]b
 	return respBody, nil
 }
 
-func (b *BikaClient) Search(keyword string, page int) ([]BikaSearchResult, int, error) {
+func (b *BikaClient) SignIn(email, password string) (*BikaUserToken, error) {
+	payload := map[string]string{
+		"email":    email,
+		"password": password,
+	}
+
+	respBody, err := b.makeRequest("POST", "auth/sign-in", payload, "")
+	if err != nil {
+		return nil, err
+	}
+
+	var resp struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Data    struct {
+			Token string `json:"token"`
+			User  struct {
+				Name  string `json:"name"`
+				Email string `json:"email"`
+			} `json:"user"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Code != 200 {
+		return nil, fmt.Errorf("login failed: %s", resp.Message)
+	}
+
+	return &BikaUserToken{
+		Token:   resp.Data.Token,
+		Name:    resp.Data.User.Name,
+		Email:   resp.Data.User.Email,
+		Expires: time.Now().Add(7 * 24 * time.Hour), // Token 有效期约7天
+	}, nil
+}
+
+func (b *BikaClient) Search(keyword string, page int, token string) ([]BikaSearchResult, int, error) {
 	payload := map[string]interface{}{
 		"keyword": keyword,
 	}
 	endpoint := fmt.Sprintf("comics/advanced-search?page=%d", page)
 
-	respBody, err := b.makeRequest("POST", endpoint, payload)
+	respBody, err := b.makeRequest("POST", endpoint, payload, token)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -238,9 +275,9 @@ func (b *BikaClient) Search(keyword string, page int) ([]BikaSearchResult, int, 
 	return resp.Data.Comics.Docs, resp.Data.Comics.Total, nil
 }
 
-func (b *BikaClient) GetComicDetail(comicID string) (*BikaComic, error) {
+func (b *BikaClient) GetComicDetail(comicID, token string) (*BikaComic, error) {
 	endpoint := fmt.Sprintf("comics/%s", comicID)
-	respBody, err := b.makeRequest("GET", endpoint, nil)
+	respBody, err := b.makeRequest("GET", endpoint, nil, token)
 	if err != nil {
 		return nil, err
 	}
@@ -262,9 +299,9 @@ func (b *BikaClient) GetComicDetail(comicID string) (*BikaComic, error) {
 	return &resp.Data.Comic, nil
 }
 
-func (b *BikaClient) GetChapters(comicID string, page int) ([]BikaChapter, int, error) {
+func (b *BikaClient) GetChapters(comicID string, page int, token string) ([]BikaChapter, int, error) {
 	endpoint := fmt.Sprintf("comics/%s/eps?page=%d", comicID, page)
-	respBody, err := b.makeRequest("GET", endpoint, nil)
+	respBody, err := b.makeRequest("GET", endpoint, nil, token)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -290,9 +327,9 @@ func (b *BikaClient) GetChapters(comicID string, page int) ([]BikaChapter, int, 
 	return resp.Data.EPS.Docs, resp.Data.EPS.Total, nil
 }
 
-func (b *BikaClient) GetChapterImages(comicID string, order, page int) ([]BikaPageItem, int, error) {
+func (b *BikaClient) GetChapterImages(comicID string, order, page int, token string) ([]BikaPageItem, int, error) {
 	endpoint := fmt.Sprintf("comics/%s/order/%d/pages?page=%d", comicID, order, page)
-	respBody, err := b.makeRequest("GET", endpoint, nil)
+	respBody, err := b.makeRequest("GET", endpoint, nil, token)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -319,7 +356,7 @@ func (b *BikaClient) GetChapterImages(comicID string, order, page int) ([]BikaPa
 	return resp.Data.Pages.Docs, resp.Data.Pages.Total, nil
 }
 
-func (b *BikaClient) DownloadChapter(ctx context.Context, comicID, comicTitle, epTitle string, epOrder int, outputDir string) (string, error) {
+func (b *BikaClient) DownloadChapter(ctx context.Context, comicID, comicTitle, epTitle string, epOrder int, outputDir, token string) (string, error) {
 	comicTitle = sanitizeBikaFilename(strings.TrimSpace(comicTitle))
 	epTitle = sanitizeBikaFilename(strings.TrimSpace(epTitle))
 	epDir := filepath.Join(outputDir, fmt.Sprintf("bika_%s", comicID), fmt.Sprintf("%d_%s", epOrder, epTitle))
@@ -333,7 +370,7 @@ func (b *BikaClient) DownloadChapter(ctx context.Context, comicID, comicTitle, e
 	var allPages []BikaPageItem
 
 	for {
-		pages, total, err := b.GetChapterImages(comicID, epOrder, page)
+		pages, total, err := b.GetChapterImages(comicID, epOrder, page, token)
 		if err != nil {
 			return "", fmt.Errorf("get chapter images failed: %v", err)
 		}
@@ -375,7 +412,7 @@ func (b *BikaClient) DownloadChapter(ctx context.Context, comicID, comicTitle, e
 			imageURL := buildBikaImageURL(p.Media.FileServer, p.Media.Path)
 			filename := filepath.Join(epDir, fmt.Sprintf("%03d_%s", idx+1, p.Media.OriginalName))
 
-			if err := downloadBikaFile(imageURL, filename, b.token); err != nil {
+			if err := downloadBikaFile(imageURL, filename, token); err != nil {
 				atomic.AddInt32(&failCount, 1)
 				log.Printf("bika download image failed [%s]: %v", filename, err)
 			} else {
@@ -460,23 +497,6 @@ func sanitizeBikaFilename(name string) string {
 	return name
 }
 
-func extractBikaIDFromInput(input string) string {
-	input = strings.TrimSpace(input)
-	re := regexp.MustCompile(`^[a-f0-9]{24}$`)
-	if re.MatchString(input) {
-		return input
-	}
-	return ""
-}
-
-type BikaPendingSearch struct {
-	Results []BikaSearchResult
-	At      time.Time
-}
-
-var bikaSearchCache = make(map[string]BikaPendingSearch)
-var bikaSearchCacheMu sync.Mutex
-
 func getBikaConfig(cfg *Config) BikaConfig {
 	return BikaConfig{
 		Enabled: cfg.BikaEnabled,
@@ -487,19 +507,161 @@ func getBikaConfig(cfg *Config) BikaConfig {
 	}
 }
 
+func (a *App) getBikaUserToken(userID int64) string {
+	bikaUserTokensMu.RLock()
+	defer bikaUserTokensMu.RUnlock()
+
+	// 优先使用用户自己的 token
+	if token, ok := bikaUserTokens[userID]; ok {
+		if time.Now().Before(token.Expires) {
+			return token.Token
+		}
+	}
+
+	// 如果用户没有 token，使用全局 token（管理员已登录的）
+	cfg := a.currentConfig()
+	if cfg.BikaEnabled && cfg.BikaToken != "" {
+		return cfg.BikaToken
+	}
+
+	return ""
+}
+
 func (a *App) handleBikaCommand(rawMessage, messageType string, groupID, userID int64, scope string, data map[string]any) bool {
+	cfg := a.currentConfig()
+
+	// 检查 bika 是否启用
+	if !cfg.BikaEnabled {
+		// 只有管理员可以启用
+		if matched(`^/bika\s+on$`, rawMessage) {
+			if !a.requireAdmin(messageType, groupID, userID, "仅管理员可启用哔咔") {
+				return true
+			}
+			a.cfgMu.Lock()
+			a.cfg.BikaEnabled = true
+			a.cfgMu.Unlock()
+			a.saveConfig()
+			a.bika = NewBikaClient(getBikaConfig(a.cfg))
+			a.sendMessage(messageType, groupID, userID, "哔咔已启用")
+			return true
+		}
+		return false
+	}
+
+	// /bika off - 关闭哔咔
+	if matched(`^/bika\s+off$`, rawMessage) {
+		if !a.requireAdmin(messageType, groupID, userID, "仅管理员可关闭哔咔") {
+			return true
+		}
+		a.cfgMu.Lock()
+		a.cfg.BikaEnabled = false
+		a.cfgMu.Unlock()
+		a.saveConfig()
+		a.bika = nil
+		a.sendMessage(messageType, groupID, userID, "哔咔已关闭")
+		return true
+	}
+
 	if a.bika == nil {
 		return false
 	}
 
+	// /bika login <email> <password>
+	if m := mustMatch(`^/bika\s+login\s+(\S+)\s+(\S+)$`, rawMessage); m != nil {
+		email := m[1]
+		password := m[2]
+
+		// 非管理员只能登录自己的账号
+		if userID != cfg.AdminID {
+			// 检查全局是否已开启（管理员已登录）
+			bikaUserTokensMu.RLock()
+			adminToken, hasAdmin := bikaUserTokens[cfg.AdminID]
+			bikaUserTokensMu.RUnlock()
+
+			if !hasAdmin || adminToken == nil || time.Now().After(adminToken.Expires) {
+				a.sendMessage(messageType, groupID, userID, "哔咔未全局开启，请等待管理员登录后再试")
+				return true
+			}
+		}
+
+		a.sendMessage(messageType, groupID, userID, "正在登录哔咔...")
+
+		token, err := a.bika.SignIn(email, password)
+		if err != nil {
+			a.sendMessage(messageType, groupID, userID, "登录失败："+err.Error())
+			return true
+		}
+
+		bikaUserTokensMu.Lock()
+		bikaUserTokens[userID] = token
+		bikaUserTokensMu.Unlock()
+
+		// 如果是管理员登录，自动设置全局 token
+		if userID == cfg.AdminID {
+			a.cfgMu.Lock()
+			a.cfg.BikaToken = token.Token
+			a.cfgMu.Unlock()
+			a.saveConfig()
+			a.bika.token = token.Token
+			a.sendMessage(messageType, groupID, userID, fmt.Sprintf("哔咔管理员登录成功：%s\n已设置为全局默认账号", token.Name))
+		} else {
+			a.sendMessage(messageType, groupID, userID, fmt.Sprintf("哔咔登录成功：%s", token.Name))
+		}
+		return true
+	}
+
+	// /bika logout
+	if matched(`^/bika\s+logout$`, rawMessage) {
+		bikaUserTokensMu.Lock()
+		delete(bikaUserTokens, userID)
+		bikaUserTokensMu.Unlock()
+
+		if userID == cfg.AdminID {
+			a.cfgMu.Lock()
+			a.cfg.BikaToken = ""
+			a.cfgMu.Unlock()
+			a.saveConfig()
+			a.bika.token = ""
+			a.sendMessage(messageType, groupID, userID, "已退出哔咔管理员账号，其他用户将无法使用")
+		} else {
+			a.sendMessage(messageType, groupID, userID, "已退出哔咔账号")
+		}
+		return true
+	}
+
+	// /bika whoami
+	if matched(`^/bika\s+whoami$`, rawMessage) {
+		bikaUserTokensMu.RLock()
+		token, ok := bikaUserTokens[userID]
+		bikaUserTokensMu.RUnlock()
+
+		if ok && time.Now().Before(token.Expires) {
+			a.sendMessage(messageType, groupID, userID, fmt.Sprintf("当前哔咔账号：%s (%s)", token.Name, token.Email))
+		} else {
+			a.sendMessage(messageType, groupID, userID, "未登录哔咔账号，使用全局账号")
+		}
+		return true
+	}
+
 	// /bika help
 	if matched(`^/bika\s+help$`, rawMessage) {
-		msg := "Bika 漫画源命令：\n" +
-			"1) /bika search <关键词>：搜索漫画\n" +
-			"2) /bika look <ID>：查看漫画详情\n" +
-			"3) /bika dl <ID> [章节]：下载漫画（可选指定章节）\n" +
-			"4) /bika confirm <序号>：确认搜索结果下载"
+		msg := "哔咔漫画源命令：\n" +
+			"1) /bika login <邮箱> <密码>：登录哔咔账号\n" +
+			"2) /bika logout：退出当前账号\n" +
+			"3) /bika whoami：查看当前登录状态\n" +
+			"4) /bika search <关键词>：搜索漫画\n" +
+			"5) /bika look <ID>：查看漫画详情\n" +
+			"6) /bika dl <ID> [章节]：下载漫画\n" +
+			"7) /bika confirm <序号>：确认搜索结果下载\n" +
+			"8) /bika on/off：启用/关闭哔咔（管理员）"
 		a.sendMessage(messageType, groupID, userID, msg)
+		return true
+	}
+
+	// 以下命令需要登录（有 token）
+	token := a.getBikaUserToken(userID)
+	if token == "" && userID != cfg.AdminID {
+		a.sendMessage(messageType, groupID, userID, "请先登录哔咔：/bika login <邮箱> <密码>")
 		return true
 	}
 
@@ -510,11 +672,11 @@ func (a *App) handleBikaCommand(rawMessage, messageType string, groupID, userID 
 			a.sendMessage(messageType, groupID, userID, "请输入搜索关键词")
 			return true
 		}
-		a.sendMessage(messageType, groupID, userID, "正在Bika搜索："+keyword+" ...")
+		a.sendMessage(messageType, groupID, userID, "正在哔咔搜索："+keyword+" ...")
 
-		results, total, err := a.bika.Search(keyword, 1)
+		results, total, err := a.bika.Search(keyword, 1, token)
 		if err != nil {
-			a.sendMessage(messageType, groupID, userID, "Bika搜索失败："+err.Error())
+			a.sendMessage(messageType, groupID, userID, "哔咔搜索失败："+err.Error())
 			return true
 		}
 		if len(results) == 0 {
@@ -537,7 +699,7 @@ func (a *App) handleBikaCommand(rawMessage, messageType string, groupID, userID 
 			}
 			lines = append(lines, fmt.Sprintf("%d. [%s] %s\n   作者：%s 标签：%s", i+1, r.ID, r.Title, r.Author, tags))
 		}
-		msg := fmt.Sprintf("Bika搜索结果（共%d条）：\n%s\n\n回复 /bika confirm <序号> 下载", total, strings.Join(lines, "\n"))
+		msg := fmt.Sprintf("哔咔搜索结果（共%d条）：\n%s\n\n回复 /bika confirm <序号> 下载", total, strings.Join(lines, "\n"))
 		a.sendRecordMessage(messageType, groupID, userID, msg)
 		return true
 	}
@@ -572,7 +734,7 @@ func (a *App) handleBikaCommand(rawMessage, messageType string, groupID, userID 
 		delete(bikaSearchCache, scope)
 		bikaSearchCacheMu.Unlock()
 
-		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("开始下载Bika漫画：%s (ID: %s)", comic.Title, comic.ID))
+		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("开始下载哔咔漫画：%s (ID: %s)", comic.Title, comic.ID))
 		go a.bikaDownloadAndSend(comic.ID, "", messageType, groupID, userID)
 		return true
 	}
@@ -580,9 +742,9 @@ func (a *App) handleBikaCommand(rawMessage, messageType string, groupID, userID 
 	// /bika look <id>
 	if m := mustMatch(`^/bika\s+look\s+([a-f0-9]+)$`, rawMessage); m != nil {
 		comicID := m[1]
-		a.sendMessage(messageType, groupID, userID, "正在查询Bika漫画："+comicID)
+		a.sendMessage(messageType, groupID, userID, "正在查询哔咔漫画："+comicID)
 
-		comic, err := a.bika.GetComicDetail(comicID)
+		comic, err := a.bika.GetComicDetail(comicID, token)
 		if err != nil {
 			a.sendMessage(messageType, groupID, userID, "查询失败："+err.Error())
 			return true
@@ -607,7 +769,7 @@ func (a *App) handleBikaCommand(rawMessage, messageType string, groupID, userID 
 		if m[2] != "" {
 			chapter = m[2]
 		}
-		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("开始下载Bika漫画 ID: %s", comicID))
+		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("开始下载哔咔漫画 ID: %s", comicID))
 		go a.bikaDownloadAndSend(comicID, chapter, messageType, groupID, userID)
 		return true
 	}
@@ -616,13 +778,15 @@ func (a *App) handleBikaCommand(rawMessage, messageType string, groupID, userID 
 }
 
 func (a *App) bikaDownloadAndSend(comicID, chapterStr string, messageType string, groupID, userID int64) {
-	comic, err := a.bika.GetComicDetail(comicID)
+	token := a.getBikaUserToken(userID)
+
+	comic, err := a.bika.GetComicDetail(comicID, token)
 	if err != nil {
 		a.sendMessage(messageType, groupID, userID, "获取漫画信息失败："+err.Error())
 		return
 	}
 
-	chapters, _, err := a.bika.GetChapters(comicID, 1)
+	chapters, _, err := a.bika.GetChapters(comicID, 1, token)
 	if err != nil {
 		a.sendMessage(messageType, groupID, userID, "获取章节列表失败："+err.Error())
 		return
@@ -671,7 +835,7 @@ func (a *App) bikaDownloadAndSend(comicID, chapterStr string, messageType string
 		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("正在下载：%s 第%d话 %s", comic.Title, ch.Order, ch.Title))
 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.DownloadTimeout)*time.Second)
-		result, err := a.bika.DownloadChapter(ctx, comicID, comic.Title, ch.Title, ch.Order, outputDir)
+		result, err := a.bika.DownloadChapter(ctx, comicID, comic.Title, ch.Title, ch.Order, outputDir, token)
 		cancel()
 
 		if err != nil {
@@ -693,5 +857,5 @@ func (a *App) bikaDownloadAndSend(comicID, chapterStr string, messageType string
 		}
 	}
 
-	a.sendMessage(messageType, groupID, userID, fmt.Sprintf("Bika漫画下载完成：%s", comic.Title))
+	a.sendMessage(messageType, groupID, userID, fmt.Sprintf("哔咔漫画下载完成：%s", comic.Title))
 }
