@@ -1880,6 +1880,14 @@ func (a *App) processTask(task DownloadTask) {
 				albumTitle = strings.TrimSpace(book.Title)
 				needDownload = false
 				log.Printf("reuse local cbz for JM%s path=%s", task.Number, path)
+			} else {
+				// ZIP mode can still reuse local PDF when CBZ is unavailable.
+				path, name = findPDF(cfg.FileDir, task.Number, "")
+				if path != "" {
+					albumTitle = strings.TrimSpace(strings.TrimSuffix(name, filepath.Ext(name)))
+					needDownload = false
+					log.Printf("reuse local pdf for JM%s path=%s (zip fallback)", task.Number, path)
+				}
 			}
 		} else {
 			path, name = findPDF(cfg.FileDir, task.Number, "")
@@ -1906,7 +1914,12 @@ func (a *App) processTask(task DownloadTask) {
 			if len(task.Number) < 4 {
 				return
 			}
-			notify("未能成功下载（可能ID错误或网络失败）")
+			reason := "未能成功下载（可能ID错误或网络失败）"
+			if err != nil {
+				reason = fmt.Sprintf("获取本子信息失败: %v", err)
+			}
+			notify(reason)
+			a.notifyAdminDownloadFailure(task.GroupID, task.Number, reason)
 			return
 		}
 		if album.Episodes > cfg.MaxEpisodes {
@@ -1923,12 +1936,16 @@ func (a *App) processTask(task DownloadTask) {
 					a.sendMessage(task.MessageType, task.GroupID, task.UserID, "正在下载本子 "+task.Number)
 				}
 				if err := a.jm.Download(ctx, task.Number); err != nil {
+					reason := fmt.Sprintf("下载失败或超时: %v", err)
 					notify("下载失败或超时")
+					a.notifyAdminDownloadFailure(task.GroupID, task.Number, reason)
 					return
 				}
 				path, name = findPDF(cfg.FileDir, task.Number, album.Title)
 				if path == "" {
-					notify("下载完成但未找到PDF文件")
+					reason := "下载完成但未找到PDF文件"
+					notify(reason)
+					a.notifyAdminDownloadFailure(task.GroupID, task.Number, reason)
 					return
 				}
 			}
@@ -1970,11 +1987,19 @@ func (a *App) processTask(task DownloadTask) {
 				encrypted = true
 			} else {
 				log.Printf("local qpdf encryption failed for JM%s, fallback to remote: %v", task.Number, err)
+				if rebuilt, rebuildErr := a.buildEncryptedPDFFromLocalManga(task.Number, encOut, password); rebuildErr == nil && rebuilt {
+					encrypted = true
+					log.Printf("local manga encryption fallback success for JM%s path=%s", task.Number, encOut)
+				} else if rebuildErr != nil {
+					log.Printf("local manga encryption fallback failed for JM%s: %v", task.Number, rebuildErr)
+				}
 			}
 		}
 		if !encrypted {
 			if err := a.jm.DownloadTo(ctx, task.Number, encOut, password); err != nil {
+				reason := fmt.Sprintf("文件加密失败: %v", err)
 				notify("文件加密失败")
+				a.notifyAdminDownloadFailure(task.GroupID, task.Number, reason)
 				return
 			}
 		}
@@ -1985,7 +2010,9 @@ func (a *App) processTask(task DownloadTask) {
 	if sendMode == "zip" && !strings.EqualFold(filepath.Ext(sendPath), ".zip") && !strings.EqualFold(filepath.Ext(sendPath), ".cbz") {
 		zipPath, err := buildZip(sendPath)
 		if err != nil {
+			reason := fmt.Sprintf("文件压缩失败: %v", err)
 			notify("文件压缩失败")
+			a.notifyAdminDownloadFailure(task.GroupID, task.Number, reason)
 			return
 		}
 		cleanup = append(cleanup, zipPath)
@@ -2066,6 +2093,38 @@ func encryptPDFWithQPDF(inFile, outFile, password string) error {
 		return fmt.Errorf("qpdf encrypt failed: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+func (a *App) buildEncryptedPDFFromLocalManga(number, outFile, password string) (bool, error) {
+	id := normalizeJMID(number)
+	if id == "" || strings.TrimSpace(outFile) == "" || strings.TrimSpace(password) == "" {
+		return false, errors.New("invalid args")
+	}
+	pages, ok, err := a.listMangaPagesByID(id)
+	if err != nil {
+		return false, err
+	}
+	if !ok || len(pages) == 0 {
+		return false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(outFile), 0o755); err != nil {
+		return false, err
+	}
+	if err := buildPDF(outFile, pages, password); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (a *App) notifyAdminDownloadFailure(groupID int64, jmNumber, reason string) {
+	cfg := a.currentConfig()
+	adminID := cfg.AdminID
+	if adminID == 0 {
+		return
+	}
+	now := time.Now().Format("2006-01-02 15:04:05")
+	msg := fmt.Sprintf("【下载失败通知】\n群号: %d\nJM号: %s\n申请时间: %s\n失败原因: %s", groupID, jmNumber, now, reason)
+	_ = a.bot.SendPrivateMessage(adminID, msg)
 }
 
 func (a *App) sendMessage(messageType string, groupID, userID int64, message string) {

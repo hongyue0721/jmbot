@@ -19,12 +19,13 @@ import (
 )
 
 type previewBook struct {
-	ID      string    `json:"id"`
-	Title   string    `json:"title"`
-	Name    string    `json:"name"`
-	Size    int64     `json:"size"`
-	ModTime time.Time `json:"mod_time"`
-	Path    string    `json:"-"`
+	ID        string    `json:"id"`
+	Title     string    `json:"title"`
+	Name      string    `json:"name"`
+	Size      int64     `json:"size"`
+	ModTime   time.Time `json:"mod_time"`
+	PageCount int       `json:"page_count"`
+	Path      string    `json:"-"`
 }
 
 type previewMetaResp struct {
@@ -275,6 +276,15 @@ func (a *App) listPreviewBooks() ([]previewBook, error) {
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].ModTime.After(out[j].ModTime)
 	})
+
+	// Get page counts for each book
+	for i := range out {
+		if pageCount, hasManga, _ := a.countMangaPagesByID(out[i].ID); hasManga {
+			out[i].PageCount = pageCount
+		} else if cnt, err := countCBZPages(out[i].Path); err == nil {
+			out[i].PageCount = cnt
+		}
+	}
 
 	previewBooksCacheMu.Lock()
 	previewBooksCache = make([]previewBook, len(out))
@@ -568,107 +578,419 @@ func previewHomeHTML() string {
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>JM 本地预览</title>
 <style>
-:root{
-  --text:#0f172a;
-  --muted:#64748b;
-  --glass:rgba(255,255,255,.68);
-  --glass-border:rgba(255,255,255,.84);
-  --line:#d9e2ee;
-  --bg:#f4f7fb;
-  --accent:#0a84ff;
+/* Design System */
+:root {
+  --text: #1d1d1f;
+  --text-secondary: #86868b;
+  --text-tertiary: #6e6e73;
+  --bg: #f5f5f7;
+  --bg-secondary: #ffffff;
+  --glass: rgba(255,255,255,0.72);
+  --glass-border: rgba(255,255,255,0.85);
+  --card-bg: rgba(255,255,255,0.65);
+  --card-border: rgba(0,0,0,0.04);
+  --line: rgba(0,0,0,0.08);
+  --btn-bg: rgba(0,0,0,0.04);
+  --accent: #0071e3;
+  --accent-hover: #0077ed;
+  --accent-light: rgba(0,113,227,0.08);
+  --shadow: 0 4px 28px rgba(0,0,0,0.08);
+  --shadow-hover: 0 12px 40px rgba(0,0,0,0.15);
+  --radius: 20px;
+  --radius-sm: 12px;
+  --transition: 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
-*{box-sizing:border-box}
-body{
-  margin:0;
-  color:var(--text);
-  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-  background:
-    radial-gradient(1200px 800px at -10% -10%, #dbeafe 0%, transparent 55%),
-    radial-gradient(900px 640px at 110% 0%, #e0e7ff 0%, transparent 60%),
-    linear-gradient(180deg,#f8fafc 0%,#eef2f7 100%);
+
+/* Dark Mode */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text: #f5f5f7;
+    --text-secondary: #a1a1a6;
+    --text-tertiary: #8e8e93;
+    --bg: #000000;
+    --bg-secondary: #1c1c1e;
+    --glass: rgba(28,28,30,0.72);
+    --glass-border: rgba(255,255,255,0.1);
+    --card-bg: rgba(28,28,30,0.65);
+    --card-border: rgba(255,255,255,0.06);
+    --line: rgba(255,255,255,0.1);
+    --btn-bg: rgba(255,255,255,0.08);
+    --accent: #0a84ff;
+    --accent-hover: #409cff;
+    --accent-light: rgba(10,132,255,0.15);
+    --shadow: 0 4px 28px rgba(0,0,0,0.4);
+    --shadow-hover: 0 12px 40px rgba(0,0,0,0.5);
+  }
 }
-.wrap{max-width:980px;margin:0 auto;padding:18px 14px 28px}
-.hero{
-  border:1px solid var(--glass-border);
-  border-radius:22px;
-  background:var(--glass);
-  backdrop-filter:saturate(170%) blur(22px);
-  -webkit-backdrop-filter:saturate(170%) blur(22px);
-  box-shadow:0 12px 34px rgba(15,23,42,.1);
-  padding:18px;
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
 }
-h2{margin:0 0 10px;font-size:26px;letter-spacing:.2px}
-.sub{margin:0 0 14px;color:var(--muted);font-size:13px}
-input{
-  width:100%;
-  padding:12px 14px;
-  border-radius:14px;
-  border:1px solid var(--line);
-  background:#fff;
-  color:var(--text);
-  font-size:16px;
-  outline:none;
+
+body::before {
+  content: '';
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(0,113,227,0.08), transparent);
+  pointer-events: none;
+  z-index: -1;
 }
-input:focus{
-  border-color:#9fc6ff;
-  box-shadow:0 0 0 4px rgba(10,132,255,.12);
+
+@media (prefers-color-scheme: dark) {
+  body::before {
+    background: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(10,132,255,0.15), transparent);
+  }
 }
-.list{margin-top:14px;display:grid;gap:10px}
-.item{
-  padding:12px;
-  border:1px solid var(--line);
-  border-radius:14px;
-  background:var(--bg);
-  display:flex;
-  justify-content:space-between;
-  gap:8px;
-  align-items:center;
+
+.wrap {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px 20px 40px;
 }
-a{color:var(--accent);text-decoration:none}
-a:hover{text-decoration:underline}
-.meta{color:var(--muted);font-size:12px;margin-top:4px}
-.dl{
-  border:1px solid #b8d7ff;
-  border-radius:999px;
-  padding:6px 10px;
-  background:rgba(10,132,255,.08);
+
+/* Header */
+.header {
+  background: var(--glass);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  box-shadow: var(--shadow);
+  padding: 24px;
+  margin-bottom: 20px;
+  animation: fadeIn 0.4s ease;
 }
-@media (max-width:680px){
-  .wrap{padding:12px 10px 20px}
-  .hero{padding:14px;border-radius:16px}
-  h2{font-size:22px}
-  .item{flex-direction:column;align-items:flex-start}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+h1 {
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+  margin-bottom: 4px;
+}
+
+.sub {
+  color: var(--text-secondary);
+  font-size: 14px;
+  margin-bottom: 16px;
+}
+
+/* Search */
+.search-wrap {
+  position: relative;
+}
+
+.search-icon {
+  position: absolute;
+  left: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  color: var(--text-tertiary);
+  pointer-events: none;
+}
+
+input {
+  width: 100%;
+  height: 44px;
+  padding: 0 14px 0 40px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  color: var(--text);
+  font-size: 15px;
+  outline: none;
+  transition: var(--transition);
+}
+
+input::placeholder { color: var(--text-tertiary); }
+input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+
+.spinner {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.spinner.active {
+  opacity: 1;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin { to { transform: translateY(-50%) rotate(360deg); } }
+
+/* Grid */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 16px;
+}
+
+/* Card */
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  cursor: pointer;
+  transition: var(--transition);
+  animation: fadeIn 0.4s ease backwards;
+}
+
+.card:nth-child(1) { animation-delay: 0.02s; }
+.card:nth-child(2) { animation-delay: 0.04s; }
+.card:nth-child(3) { animation-delay: 0.06s; }
+.card:nth-child(4) { animation-delay: 0.08s; }
+.card:nth-child(5) { animation-delay: 0.1s; }
+.card:nth-child(6) { animation-delay: 0.12s; }
+.card:nth-child(n+7) { animation-delay: 0.14s; }
+
+.card:hover {
+  transform: translateY(-4px);
+  box-shadow: var(--shadow-hover);
+  background: var(--bg-secondary);
+}
+
+/* Cover */
+.cover {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 3/4;
+  background: var(--btn-bg);
+  overflow: hidden;
+}
+
+.cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.cover-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+}
+
+.cover-placeholder svg {
+  width: 40px;
+  height: 40px;
+  opacity: 0.3;
+}
+
+.dl-btn {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.5);
+  backdrop-filter: blur(10px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  opacity: 0;
+  transform: scale(0.9);
+  transition: var(--transition);
+  text-decoration: none;
+}
+
+.card:hover .dl-btn {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.dl-btn:hover {
+  background: var(--accent);
+}
+
+.dl-btn svg { width: 14px; height: 14px; }
+
+/* Info */
+.info {
+  padding: 12px;
+}
+
+.title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.title-id {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Tags */
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 8px;
+  background: var(--accent-light);
+  border-radius: 6px;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.tag svg { width: 10px; height: 10px; }
+
+/* Empty */
+.empty {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--text-secondary);
+}
+
+.empty-icon {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 16px;
+  opacity: 0.25;
+}
+
+.empty-text { font-size: 16px; margin-bottom: 4px; }
+.empty-hint { font-size: 13px; opacity: 0.7; }
+
+/* Responsive */
+@media (max-width: 680px) {
+  .wrap { padding: 16px 12px 32px; }
+  .header { padding: 18px; border-radius: 14px; }
+  h1 { font-size: 22px; }
+  .grid {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 12px;
+  }
+  .info { padding: 10px; }
+  .title { font-size: 12px; }
 }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <div class="hero">
-  <h2>JM 本地 CBZ 预览</h2>
-  <p class="sub">输入 JM 号或关键词，快速打开阅读页面</p>
-  <input id="q" placeholder="输入 JM 号或标题关键词，例如 350234" />
-  <div id="list" class="list"></div>
+  <div class="header">
+    <h1>JM 本地预览</h1>
+    <p class="sub">输入 JM 号或关键词搜索</p>
+    <div class="search-wrap">
+      <input id="q" placeholder="搜索 JM 号或标题..." />
+      <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+      </svg>
+      <div class="spinner" id="spinner"></div>
+    </div>
   </div>
+  <div id="grid" class="grid"></div>
 </div>
 <script>
 const q = document.getElementById('q');
-const list = document.getElementById('list');
-async function load(){
-  const kw = encodeURIComponent(q.value.trim());
-  const r = await fetch('/api/search?q=' + kw);
-  const data = await r.json();
-  const items = (data.items || []);
-  list.innerHTML = items.map(function(it){
-    return '<div class="item">' +
-      '<div>' +
-      '<div><a href="/' + it.id + '">JM' + it.id + '</a> - ' + it.title + '</div>' +
-      '<div class="meta">' + it.name + ' · ' + (it.size/1024/1024).toFixed(2) + 'MB</div>' +
-      '</div>' +
-      '<div><a class="dl" href="/api/comic/' + it.id + '/download">下载</a></div>' +
-      '</div>';
-  }).join('');
+const grid = document.getElementById('grid');
+const spinner = document.getElementById('spinner');
+let timer = null;
+
+const icons = {
+  image: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>',
+  download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
+  pages: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>',
+  size: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
+  empty: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/><line x1="8" y1="11" x2="14" y2="11"/></svg>'
+};
+
+function formatSize(bytes) {
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1024 / 1024).toFixed(1) + ' MB';
 }
-q.addEventListener('input', () => load());
+
+function renderEmpty(kw) {
+  return '<div class="empty">' +
+    '<div class="empty-icon">' + icons.empty + '</div>' +
+    '<div class="empty-text">未找到漫画</div>' +
+    (kw ? '<div class="empty-hint">尝试其他关键词</div>' : '') +
+    '</div>';
+}
+
+function renderCard(it) {
+  const coverUrl = '/api/comic/' + it.id + '/page/1';
+  const pageCount = it.page_count > 0 ? it.page_count + 'P' : '';
+  const size = formatSize(it.size);
+  return '<div class="card" onclick="location.href=\'/' + it.id + '\'">' +
+    '<div class="cover">' +
+    '<div class="cover-placeholder">' + icons.image + '</div>' +
+    '<img src="' + coverUrl + '" loading="lazy" onerror="this.style.display=\'none\'" onload="this.previousElementSibling.style.display=\'none\'" />' +
+    '<a class="dl-btn" href="/api/comic/' + it.id + '/download" onclick="event.stopPropagation()" title="下载">' + icons.download + '</a>' +
+    '</div>' +
+    '<div class="info">' +
+    '<div class="title"><span class="title-id">JM' + it.id + '</span> ' + it.title + '</div>' +
+    '<div class="tags">' +
+    (pageCount ? '<span class="tag">' + icons.pages + ' ' + pageCount + '</span>' : '') +
+    '<span class="tag">' + icons.size + ' ' + size + '</span>' +
+    '</div>' +
+    '</div>' +
+    '</div>';
+}
+
+async function load() {
+  clearTimeout(timer);
+  spinner.classList.add('active');
+  try {
+    const r = await fetch('/api/search?q=' + encodeURIComponent(q.value.trim()));
+    const data = await r.json();
+    const items = data.items || [];
+    if (items.length === 0) {
+      grid.innerHTML = renderEmpty(q.value.trim());
+    } else {
+      grid.innerHTML = items.map(renderCard).join('');
+    }
+  } catch (e) {
+    grid.innerHTML = renderEmpty('');
+  } finally {
+    timer = setTimeout(() => spinner.classList.remove('active'), 200);
+  }
+}
+
+q.addEventListener('input', load);
 load();
 </script>
 </body>
@@ -685,173 +1007,382 @@ func previewViewerHTML(id string) string {
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>JM` + id + ` 预览</title>
 <style>
-:root{
-  --text:#0f172a;
-  --muted:#475569;
-  --glass:rgba(255,255,255,.66);
-  --glass-border:rgba(255,255,255,.82);
-  --btn:#f8fafc;
-  --btn-border:#d6deea;
-  --btn-hover:#f1f5f9;
-  --accent:#0a84ff;
+/* Design System */
+:root {
+  --text: #1d1d1f;
+  --text-secondary: #86868b;
+  --text-tertiary: #6e6e73;
+  --bg: #f5f5f7;
+  --bg-secondary: #ffffff;
+  --glass: rgba(255,255,255,0.72);
+  --glass-border: rgba(255,255,255,0.85);
+  --btn-bg: rgba(0,0,0,0.04);
+  --btn-border: rgba(0,0,0,0.06);
+  --btn-hover: rgba(0,0,0,0.08);
+  --accent: #0071e3;
+  --accent-hover: #0077ed;
+  --accent-light: rgba(0,113,227,0.1);
+  --shadow: 0 4px 28px rgba(0,0,0,0.08);
+  --shadow-lg: 0 12px 40px rgba(0,0,0,0.12);
+  --radius: 18px;
+  --radius-sm: 10px;
+  --transition: 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
-*{box-sizing:border-box}
-html,body{height:100%}
-body{
-  margin:0;
-  color:var(--text);
-  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-  background:
-    radial-gradient(1200px 800px at -10% -10%, #dbeafe 0%, transparent 55%),
-    radial-gradient(900px 600px at 110% 0%, #e0e7ff 0%, transparent 60%),
-    linear-gradient(180deg,#f8fafc 0%,#eef2f7 100%);
+
+/* Dark Mode */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text: #f5f5f7;
+    --text-secondary: #a1a1a6;
+    --text-tertiary: #8e8e93;
+    --bg: #000000;
+    --bg-secondary: #1c1c1e;
+    --glass: rgba(28,28,30,0.72);
+    --glass-border: rgba(255,255,255,0.1);
+    --btn-bg: rgba(255,255,255,0.08);
+    --btn-border: rgba(255,255,255,0.1);
+    --btn-hover: rgba(255,255,255,0.12);
+    --accent: #0a84ff;
+    --accent-hover: #409cff;
+    --accent-light: rgba(10,132,255,0.15);
+    --shadow: 0 4px 28px rgba(0,0,0,0.4);
+    --shadow-lg: 0 12px 40px rgba(0,0,0,0.5);
+  }
 }
-.shell{
-  min-height:100%;
-  padding:18px 16px 18px;
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
 }
-.bar{
-  position:sticky;
-  top:0;
-  margin:0 auto;
-  max-width:1200px;
-  min-height:62px;
-  border:1px solid var(--glass-border);
-  border-radius:18px;
-  background:var(--glass);
-  backdrop-filter:saturate(170%) blur(22px);
-  -webkit-backdrop-filter:saturate(170%) blur(22px);
-  box-shadow:0 10px 30px rgba(15,23,42,.12);
-  display:flex;
-  align-items:center;
-  gap:8px;
-  padding:8px;
-  z-index:10;
+
+/* Background */
+body::before {
+  content: '';
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: radial-gradient(ellipse 100% 60% at 50% -10%, rgba(0,113,227,0.06), transparent);
+  pointer-events: none;
+  z-index: -1;
 }
-.btn{
-  appearance:none;
-  text-decoration:none;
-  background:var(--btn);
-  color:var(--text);
-  border:1px solid var(--btn-border);
-  border-radius:999px;
-  padding:8px 13px;
-  line-height:1;
-  font-size:14px;
-  cursor:pointer;
-  transition:all .18s ease;
+
+@media (prefers-color-scheme: dark) {
+  body::before {
+    background: radial-gradient(ellipse 100% 60% at 50% -10%, rgba(10,132,255,0.12), transparent);
+  }
 }
-.btn:hover{background:var(--btn-hover);border-color:#c7d2e2}
-.btn:active{transform:translateY(1px) scale(.99)}
-.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-.title{
-  flex:1;
-  white-space:nowrap;
-  overflow:hidden;
-  text-overflow:ellipsis;
-  color:#0f172a;
-  font-weight:600;
-  letter-spacing:.2px;
-  min-width:120px;
+
+.shell {
+  min-height: 100%;
+  padding: 16px;
 }
-.badge{
-  font-size:12px;
-  color:var(--muted);
-  border-radius:999px;
-  border:1px solid #d8e0eb;
-  background:rgba(255,255,255,.8);
-  padding:5px 9px;
+
+/* Toolbar */
+.bar {
+  position: sticky;
+  top: 12px;
+  max-width: 1100px;
+  margin: 0 auto 16px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  background: var(--glass);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  box-shadow: var(--shadow);
+  z-index: 100;
+  animation: slideDown 0.35s ease;
 }
-.viewer{
-  max-width:1200px;
-  margin:14px auto 0;
-  min-height:calc(100vh - 112px);
-  border-radius:24px;
-  border:1px solid rgba(255,255,255,.86);
-  background:rgba(255,255,255,.46);
-  box-shadow:0 18px 42px rgba(15,23,42,.1), inset 0 1px 0 rgba(255,255,255,.75);
-  backdrop-filter:blur(4px);
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  padding:16px;
+
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-12px); }
+  to { opacity: 1; transform: translateY(0); }
 }
-img{
-  max-width:100%;
-  max-height:calc(100vh - 168px);
-  object-fit:contain;
-  border-radius:16px;
-  box-shadow:0 10px 40px rgba(15,23,42,.15);
-  transition:transform .2s ease, box-shadow .2s ease;
+
+/* Buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 8px 12px;
+  background: var(--btn-bg);
+  border: 1px solid var(--btn-border);
+  border-radius: 999px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: var(--transition);
+  text-decoration: none;
+  white-space: nowrap;
 }
-img:hover{transform:translateY(-1px);box-shadow:0 14px 44px rgba(15,23,42,.18)}
-@media (max-width:720px){
-  .shell{padding:10px}
-  .bar{border-radius:14px;padding:7px;gap:6px;flex-wrap:wrap}
-  .title{order:10;flex-basis:100%}
-  .viewer{border-radius:16px;min-height:calc(100vh - 156px)}
-  img{max-height:calc(100vh - 220px)}
+
+.btn svg {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+}
+
+.btn:hover { background: var(--btn-hover); }
+.btn:active { transform: scale(0.97); }
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.btn.primary:hover { background: var(--accent-hover); }
+
+/* Title */
+.title {
+  flex: 1;
+  min-width: 80px;
+  padding: 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Badge */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  background: var(--accent-light);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.badge svg { width: 12px; height: 12px; }
+
+/* Page indicator dots */
+.page-dots {
+  display: flex;
+  gap: 3px;
+  padding: 0 6px;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--btn-border);
+  transition: var(--transition);
+}
+
+.dot.active { background: var(--accent); transform: scale(1.2); }
+
+/* Viewer */
+.viewer {
+  max-width: 1100px;
+  margin: 0 auto;
+  min-height: calc(100vh - 120px);
+  background: var(--glass);
+  border: 1px solid var(--glass-border);
+  border-radius: 20px;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  animation: fadeIn 0.4s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Image */
+.img-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+img {
+  max-width: 100%;
+  max-height: calc(100vh - 180px);
+  object-fit: contain;
+  border-radius: 12px;
+  box-shadow: var(--shadow-lg);
+}
+
+
+/* Error state */
+.error {
+  text-align: center;
+  padding: 48px;
+  color: var(--text-secondary);
+}
+
+.error-icon {
+  width: 48px;
+  height: 48px;
+  margin: 0 auto 12px;
+  opacity: 0.4;
+}
+
+/* Responsive */
+@media (max-width: 720px) {
+  .shell { padding: 10px; }
+  .bar {
+    top: 8px;
+    border-radius: 14px;
+    padding: 5px;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  .title {
+    order: 10;
+    flex-basis: 100%;
+    text-align: center;
+    padding: 6px 0 0;
+    font-size: 13px;
+  }
+  .btn { padding: 7px 10px; font-size: 12px; }
+  .btn svg { width: 14px; height: 14px; }
+  .viewer { border-radius: 14px; padding: 12px; min-height: calc(100vh - 140px); }
+  img { max-height: calc(100vh - 200px); }
 }
 </style>
 </head>
 <body>
 <div class="shell">
 <div class="bar">
-  <button class="btn" id="back">返回</button>
-  <button class="btn" id="prev">上一页</button>
-  <button class="btn primary" id="next">下一页</button>
-  <button class="btn" id="fullscreen">全屏</button>
-  <a class="btn" id="download" href="#">下载</a>
+  <button class="btn" id="back" title="返回首页">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="m15 18-6-6 6-6"/>
+    </svg>
+  </button>
+  <button class="btn" id="prev" title="上一页 (←/A)">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="15 18 9 12 15 6"/>
+    </svg>
+  </button>
+  <button class="btn primary" id="next" title="下一页 (→/D)">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="9 18 15 12 9 6"/>
+    </svg>
+  </button>
+  <div class="page-dots" id="dots"></div>
   <div class="title" id="title">加载中...</div>
-  <div class="badge" id="badge">第 1 / 1 页</div>
+  <div class="badge" id="badge">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+    <span id="badge-text">- / -</span>
+  </div>
+  <button class="btn" id="fullscreen" title="全屏 (F)">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/>
+      <line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>
+    </svg>
+  </button>
+  <a class="btn" id="download" href="#" title="下载">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+      <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+    </svg>
+  </a>
 </div>
-<div class="viewer"><img id="img" alt="page"/></div>
+<div class="viewer">
+  <div class="img-wrap">
+    <img id="img" alt="page"/>
+  </div>
+</div>
 </div>
 <script>
 const state = ` + string(b) + `;
 let page = 1;
 let total = 1;
 const img = document.getElementById('img');
-const title = document.getElementById('title');
-const badge = document.getElementById('badge');
-async function init(){
-  const r = await fetch('/api/comic/' + state.id);
-  if (!r.ok) {
-    title.textContent = '未找到本地 CBZ：JM' + state.id;
-    return;
+const titleEl = document.getElementById('title');
+const badgeText = document.getElementById('badge-text');
+const dots = document.getElementById('dots');
+const dlBtn = document.getElementById('download');
+
+function renderDots() {
+  const maxDots = Math.min(total, 9);
+  const half = Math.floor(maxDots / 2);
+  let start = Math.max(1, page - half);
+  let end = start + maxDots - 1;
+  if (end > total) { end = total; start = Math.max(1, end - maxDots + 1); }
+  let html = '';
+  for (let i = start; i <= end; i++) {
+    html += '<div class="dot' + (i === page ? ' active' : '') + '"></div>';
   }
-  const meta = await r.json();
-  total = Math.max(1, meta.page_count || 1);
-  const dl = document.getElementById('download');
-  if (meta.download) {
-    dl.href = meta.download;
-    dl.style.display = '';
-  } else {
-    dl.style.display = 'none';
-  }
-  title.textContent = 'JM' + meta.id + ' - ' + meta.title;
-  render();
+  dots.innerHTML = html;
 }
-function render(){
+
+async function init() {
+  try {
+    const r = await fetch('/api/comic/' + state.id);
+    if (!r.ok) {
+      showError('未找到本地漫画：JM' + state.id);
+      return;
+    }
+    const meta = await r.json();
+    total = Math.max(1, meta.page_count || 1);
+    if (meta.download) {
+      dlBtn.href = meta.download;
+      dlBtn.style.display = '';
+    } else {
+      dlBtn.style.display = 'none';
+    }
+    titleEl.textContent = 'JM' + meta.id + (meta.title ? ' - ' + meta.title : '');
+    render();
+  } catch (e) {
+    showError('加载失败');
+  }
+}
+
+function showError(msg) {
+  skeleton.style.display = 'none';
+  document.querySelector('.viewer').innerHTML = '<div class="error">' +
+    '<div class="error-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">' +
+    '<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>' +
+    '</svg></div><div>' + msg + '</div></div>';
+}
+
+function render() {
   if (page < 1) page = 1;
   if (page > total) page = total;
   img.src = '/api/comic/' + state.id + '/page/' + page;
-  title.textContent = title.textContent.split(' ｜ ')[0] + ' ｜ 第 ' + page + ' / ' + total + ' 页';
-  badge.textContent = '第 ' + page + ' / ' + total + ' 页';
+  badgeText.textContent = page + ' / ' + total;
+  renderDots();
 }
-document.getElementById('prev').onclick = () => { page--; render(); };
-document.getElementById('next').onclick = () => { page++; render(); };
+
+document.getElementById('prev').onclick = () => { if (page > 1) { page--; render(); } };
+document.getElementById('next').onclick = () => { if (page < total) { page++; render(); } };
 document.getElementById('back').onclick = () => { location.href = '/'; };
 document.getElementById('fullscreen').onclick = async () => {
   if (!document.fullscreenElement) await document.documentElement.requestFullscreen();
   else await document.exitFullscreen();
 };
+
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'ArrowLeft' || e.key.toLowerCase() === 'a') { page--; render(); }
-  if (e.key === 'ArrowRight' || e.key.toLowerCase() === 'd') { page++; render(); }
+  if (e.key === 'ArrowLeft' || e.key.toLowerCase() === 'a') { if (page > 1) { page--; render(); } }
+  if (e.key === 'ArrowRight' || e.key.toLowerCase() === 'd') { if (page < total) { page++; render(); } }
   if (e.key.toLowerCase() === 'f') document.getElementById('fullscreen').click();
 });
-img.addEventListener('click', () => { page++; render(); });
+
+img.addEventListener('click', () => { if (page < total) { page++; render(); } });
 init();
 </script>
 </body>
