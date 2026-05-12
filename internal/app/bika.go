@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -428,9 +429,42 @@ func (b *BikaClient) DownloadChapter(ctx context.Context, comicID, comicTitle, e
 		return "", fmt.Errorf("all images download failed")
 	}
 
+	// 收集所有图片文件并排序
+	var imageFiles []string
+	entries, err := os.ReadDir(epDir)
+	if err == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
+				name := e.Name()
+				ext := strings.ToLower(filepath.Ext(name))
+				if ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".webp" {
+					imageFiles = append(imageFiles, filepath.Join(epDir, name))
+				}
+			}
+		}
+	}
+	sort.Strings(imageFiles)
+
+	// 生成PDF
+	pdfPath := epDir + ".pdf"
+	if len(imageFiles) > 0 {
+		if err := buildPDF(pdfPath, imageFiles, ""); err != nil {
+			log.Printf("bika pdf build failed: %v", err)
+			// 回退到CBZ
+			cbzPath := epDir + ".cbz"
+			if err := zipDirToCBZ(epDir, cbzPath); err != nil {
+				return epDir, nil
+			}
+			os.RemoveAll(epDir)
+			return cbzPath, nil
+		}
+		os.RemoveAll(epDir)
+		return pdfPath, nil
+	}
+
+	// 没有图片，回退到CBZ
 	cbzPath := epDir + ".cbz"
 	if err := zipDirToCBZ(epDir, cbzPath); err != nil {
-		log.Printf("bika cbz pack failed: %v", err)
 		return epDir, nil
 	}
 	os.RemoveAll(epDir)
@@ -912,22 +946,99 @@ func (a *App) bikaDownloadComic(ctx context.Context, comicID, chapterStr string,
 		toDownload = chapters
 	}
 
-	var lastCBZ string
-	for _, ch := range toDownload {
+	// 单章节直接下载
+	if len(toDownload) == 1 {
 		chCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.DownloadTimeout)*time.Second)
-		result, err := a.bika.DownloadChapter(chCtx, comicID, comic.Title, ch.Title, ch.Order, outputDir, token)
+		result, err := a.bika.DownloadChapter(chCtx, comicID, comic.Title, toDownload[0].Title, toDownload[0].Order, outputDir, token)
 		cancel()
-
 		if err != nil {
-			log.Printf("bika download chapter %d failed: %v", ch.Order, err)
-			continue
+			return "", fmt.Errorf("download chapter failed: %v", err)
 		}
-		lastCBZ = result
+		return result, nil
 	}
 
-	if lastCBZ == "" {
+	// 多章节：下载所有章节后合并成一个CBZ
+	comicTitle := sanitizeBikaFilename(strings.TrimSpace(comic.Title))
+	mergeDir := filepath.Join(outputDir, fmt.Sprintf("bika_%s", comicID), comicTitle)
+	if err := os.MkdirAll(mergeDir, 0755); err != nil {
+		return "", fmt.Errorf("create merge dir failed: %v", err)
+	}
+
+	successCount := 0
+	for _, ch := range toDownload {
+		_, cancel := context.WithTimeout(ctx, time.Duration(cfg.DownloadTimeout)*time.Second)
+		epTitle := sanitizeBikaFilename(strings.TrimSpace(ch.Title))
+		chapterDir := filepath.Join(mergeDir, fmt.Sprintf("%03d_%s", ch.Order, epTitle))
+
+		// 下载章节图片
+		page := 1
+		for {
+			pages, total, imgErr := a.bika.GetChapterImages(comicID, ch.Order, page, token)
+			if imgErr != nil || len(pages) == 0 {
+				break
+			}
+			if err := os.MkdirAll(chapterDir, 0755); err != nil {
+				break
+			}
+			for idx, p := range pages {
+				imageURL := buildBikaImageURL(p.Media.FileServer, p.Media.Path)
+				filename := filepath.Join(chapterDir, fmt.Sprintf("%03d_%s", idx+1, p.Media.OriginalName))
+				_ = downloadBikaFile(imageURL, filename, token)
+			}
+			if page >= total {
+				break
+			}
+			page++
+		}
+		cancel()
+
+		// 检查是否有图片
+		if entries, err := os.ReadDir(chapterDir); err == nil && len(entries) > 0 {
+			successCount++
+		}
+	}
+
+	if successCount == 0 {
+		os.RemoveAll(mergeDir)
 		return "", fmt.Errorf("all chapters download failed")
 	}
 
-	return lastCBZ, nil
+	// 收集所有图片文件并排序
+	var allImageFiles []string
+	filepath.Walk(mergeDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(info.Name()))
+		if ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".webp" {
+			allImageFiles = append(allImageFiles, path)
+		}
+		return nil
+	})
+	sort.Strings(allImageFiles)
+
+	// 生成PDF
+	if len(allImageFiles) > 0 {
+		pdfPath := filepath.Join(outputDir, fmt.Sprintf("bika_%s_%s.pdf", comicID, comicTitle))
+		if err := buildPDF(pdfPath, allImageFiles, ""); err != nil {
+			log.Printf("merge pdf failed: %v", err)
+			// 回退到CBZ
+			cbzPath := filepath.Join(outputDir, fmt.Sprintf("bika_%s_%s.cbz", comicID, comicTitle))
+			if err := zipDirToCBZ(mergeDir, cbzPath); err != nil {
+				return mergeDir, nil
+			}
+			os.RemoveAll(mergeDir)
+			return cbzPath, nil
+		}
+		os.RemoveAll(mergeDir)
+		return pdfPath, nil
+	}
+
+	// 回退到CBZ
+	cbzPath := filepath.Join(outputDir, fmt.Sprintf("bika_%s_%s.cbz", comicID, comicTitle))
+	if err := zipDirToCBZ(mergeDir, cbzPath); err != nil {
+		return mergeDir, nil
+	}
+	os.RemoveAll(mergeDir)
+	return cbzPath, nil
 }
