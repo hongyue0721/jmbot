@@ -112,6 +112,11 @@ type Config struct {
 	BikaToken   string `yaml:"bika_token"`
 	BikaQuality string `yaml:"bika_quality"`
 	BikaProxy   string `yaml:"bika_proxy"`
+
+	DailyRecommendEnabled bool    `yaml:"daily_recommend_enabled"`
+	DailyRecommendHour    int     `yaml:"daily_recommend_hour"`
+	DailyRecommendMinute  int     `yaml:"daily_recommend_minute"`
+	DailyRecommendGroups  []int64 `yaml:"daily_recommend_groups"`
 }
 
 type App struct {
@@ -428,6 +433,7 @@ func NewApp(configPath, configExamplePath string) (*App, error) {
 		app.bika = NewBikaClient(getBikaConfig(cfg))
 	}
 	app.jm.SetCBZOptions(cfg.CBZChapterEnabled, cfg.CBZSeriesEnabled)
+	app.startDailyRecommend()
 	return app, nil
 }
 
@@ -1371,6 +1377,55 @@ func (a *App) handleMessageEvent(data map[string]any) {
 		a.cfgMu.Unlock()
 		a.saveConfig()
 		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("章节数阈值已设为 %d", n))
+		return
+	}
+	if matched(`^/jm\s+daily\s+on$`, rawMessage) {
+		if !a.requireAdmin(messageType, groupID, userID, "仅管理员可操作") {
+			return
+		}
+		a.cfgMu.Lock()
+		a.cfg.DailyRecommendEnabled = true
+		a.cfgMu.Unlock()
+		a.saveConfig()
+		a.startDailyRecommend()
+		a.sendMessage(messageType, groupID, userID, "每日本子推荐已开启")
+		return
+	}
+	if matched(`^/jm\s+daily\s+off$`, rawMessage) {
+		if !a.requireAdmin(messageType, groupID, userID, "仅管理员可操作") {
+			return
+		}
+		a.cfgMu.Lock()
+		a.cfg.DailyRecommendEnabled = false
+		a.cfgMu.Unlock()
+		a.saveConfig()
+		a.sendMessage(messageType, groupID, userID, "每日本子推荐已关闭")
+		return
+	}
+	if m := mustMatch(`^/jm\s+daily\s+add\s+(\d+)$`, rawMessage); m != nil {
+		if !a.requireAdmin(messageType, groupID, userID, "仅管理员可操作") {
+			return
+		}
+		groupIDToAdd, _ := strconv.ParseInt(m[1], 10, 64)
+		a.cfgMu.Lock()
+		if !containsInt64(a.cfg.DailyRecommendGroups, groupIDToAdd) {
+			a.cfg.DailyRecommendGroups = append(a.cfg.DailyRecommendGroups, groupIDToAdd)
+		}
+		a.cfgMu.Unlock()
+		a.saveConfig()
+		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("已添加每日推荐群：%d", groupIDToAdd))
+		return
+	}
+	if m := mustMatch(`^/jm\s+daily\s+del\s+(\d+)$`, rawMessage); m != nil {
+		if !a.requireAdmin(messageType, groupID, userID, "仅管理员可操作") {
+			return
+		}
+		groupIDToDel, _ := strconv.ParseInt(m[1], 10, 64)
+		a.cfgMu.Lock()
+		a.cfg.DailyRecommendGroups = removeInt64(a.cfg.DailyRecommendGroups, groupIDToDel)
+		a.cfgMu.Unlock()
+		a.saveConfig()
+		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("已删除每日推荐群：%d", groupIDToDel))
 		return
 	}
 	if m := mustMatch(`^/jm\s+look\s+(\d+)$`, rawMessage); m != nil {
@@ -3756,7 +3811,9 @@ func helpMessage() string {
 		"11) /jm regex on|off：设置正则模式\n" +
 		"12) /jm dedup show|set|clear：重复请求冷却管理（管理员）\n" +
 		"13) /jm cfg list|show|set：在线配置开关（管理员）\n" +
-		"14) /jm help：查看帮助\n\n" +
+		"14) /jm daily on|off：启用/关闭每日本子推荐（管理员）\n" +
+		"15) /jm daily add|del <群号>：添加/删除推荐群（管理员）\n" +
+		"16) /jm help：查看帮助\n\n" +
 		"【哔咔漫画】\n" +
 		"1) /bika on|off：启用/关闭哔咔（管理员）\n" +
 		"2) /bika login <邮箱> <密码>：登录哔咔账号\n" +
@@ -3780,6 +3837,25 @@ func contains(list []string, v string) bool {
 
 func removeStr(list []string, v string) []string {
 	out := make([]string, 0, len(list))
+	for _, item := range list {
+		if item != v {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func containsInt64(list []int64, v int64) bool {
+	for _, item := range list {
+		if item == v {
+			return true
+		}
+	}
+	return false
+}
+
+func removeInt64(list []int64, v int64) []int64 {
+	out := make([]int64, 0, len(list))
 	for _, item := range list {
 		if item != v {
 			out = append(out, item)
