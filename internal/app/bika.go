@@ -736,15 +736,15 @@ func (a *App) handleBikaCommand(rawMessage, messageType string, groupID, userID 
 			if len(tags) > 50 {
 				tags = tags[:50] + "..."
 			}
-			lines = append(lines, fmt.Sprintf("%d. [%s] %s\n   作者：%s 标签：%s", i+1, r.ID, r.Title, r.Author, tags))
+			lines = append(lines, fmt.Sprintf("%d. %s\n   作者：%s 标签：%s", i+1, r.Title, r.Author, tags))
 		}
-		msg := fmt.Sprintf("哔咔搜索结果（共%d条）：\n%s\n\n回复 /bika confirm <序号> 下载", total, strings.Join(lines, "\n"))
+		msg := fmt.Sprintf("哔咔搜索结果（共%d条）：\n%s\n\n回复 确认 <序号> 下载", total, strings.Join(lines, "\n"))
 		a.sendRecordMessage(messageType, groupID, userID, msg)
 		return true
 	}
 
-	// /bika confirm <index>
-	if m := mustMatch(`^/bika\s+confirm\s+(\d+)$`, rawMessage); m != nil {
+	// /bika confirm <index> 或 确认 <index>
+	if m := mustMatch(`^(?:/bika\s+confirm|确认)\s+(\d+)$`, rawMessage); m != nil {
 		idx, _ := strconv.Atoi(m[1])
 		if idx <= 0 {
 			a.sendMessage(messageType, groupID, userID, "序号无效")
