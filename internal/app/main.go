@@ -1952,7 +1952,7 @@ func (a *App) processTask(task DownloadTask) {
 		if a.bika != nil && albumTitle != "" {
 			token := a.getBikaUserToken(task.UserID)
 			if token != "" {
-				// 构建搜索关键词列表：原始标题、去除[]、去除()
+				// 构建搜索关键词列表：原始标题、去除[]、去除()、都去除
 				searchKeywords := []string{albumTitle}
 				cleaned1 := regexp.MustCompile(`\[.*?\]`).ReplaceAllString(albumTitle, "")
 				cleaned1 = strings.TrimSpace(cleaned1)
@@ -1963,6 +1963,11 @@ func (a *App) processTask(task DownloadTask) {
 				cleaned2 = strings.TrimSpace(cleaned2)
 				if cleaned2 != "" && cleaned2 != albumTitle && cleaned2 != cleaned1 {
 					searchKeywords = append(searchKeywords, cleaned2)
+				}
+				cleaned3 := regexp.MustCompile(`[\[\(].*?[\]\)]`).ReplaceAllString(albumTitle, "")
+				cleaned3 = strings.TrimSpace(cleaned3)
+				if cleaned3 != "" && cleaned3 != albumTitle && cleaned3 != cleaned1 && cleaned3 != cleaned2 {
+					searchKeywords = append(searchKeywords, cleaned3)
 				}
 
 				var bestMatch *BikaSearchResult
