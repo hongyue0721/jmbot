@@ -445,24 +445,30 @@ func (b *BikaClient) DownloadChapter(ctx context.Context, comicID, comicTitle, e
 	}
 	sort.Strings(imageFiles)
 
+	// 先生成PDF用于发送
+	pdfPath := filepath.Join(filepath.Dir(epDir), comicTitle+".pdf")
+	pdfOK := false
+	if len(imageFiles) > 0 {
+		if err := buildPDF(pdfPath, imageFiles, ""); err != nil {
+			log.Printf("bika pdf build failed: %v", err)
+		} else {
+			pdfOK = true
+		}
+	}
+
 	// 生成CBZ并保留
 	cbzPath := filepath.Join(filepath.Dir(epDir), comicTitle+".cbz")
 	if err := zipDirToCBZ(epDir, cbzPath); err != nil {
 		log.Printf("bika cbz build failed: %v", err)
-		return epDir, nil
 	}
+
+	// 删除临时图片目录
 	os.RemoveAll(epDir)
 
-	// 同时生成PDF用于发送
-	if len(imageFiles) > 0 {
-		pdfPath := filepath.Join(filepath.Dir(epDir), comicTitle+".pdf")
-		if err := buildPDF(pdfPath, imageFiles, ""); err != nil {
-			log.Printf("bika pdf build failed: %v, using cbz", err)
-			return cbzPath, nil
-		}
+	// 返回PDF或CBZ
+	if pdfOK {
 		return pdfPath, nil
 	}
-
 	return cbzPath, nil
 }
 
