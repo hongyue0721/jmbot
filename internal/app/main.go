@@ -1462,7 +1462,7 @@ func (a *App) handleMessageEvent(data map[string]any) {
 		a.sendRecordMessage(messageType, groupID, userID, msg)
 		return
 	}
-	if m := mustMatch(`^/jm\s+search\s+(.+)$`, rawMessage); m != nil {
+	if m := mustMatch(`^(?:/jm\s+search|搜索)\s+(.+)$`, rawMessage); m != nil {
 		if !a.isJMAllowed(messageType, groupID, userID) {
 			return
 		}
