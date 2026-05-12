@@ -1947,6 +1947,37 @@ func (a *App) processTask(task DownloadTask) {
 		if strings.TrimSpace(albumTitle) == "" {
 			albumTitle = strings.TrimSpace(album.Title)
 		}
+
+		// 哔咔升级策略：尝试用本子名在哔咔搜索，如果有匹配就用哔咔下载原画画质
+		if a.bika != nil && albumTitle != "" {
+			token := a.getBikaUserToken(task.UserID)
+			if token != "" {
+				log.Printf("bika upgrade: searching for '%s' on bika", albumTitle)
+				results, _, searchErr := a.bika.Search(albumTitle, 1, token)
+				if searchErr == nil && len(results) > 0 {
+					// 找到匹配的哔咔漫画，使用哔咔下载
+					bestMatch := results[0]
+					log.Printf("bika upgrade: found match '%s' (ID: %s), downloading from bika", bestMatch.Title, bestMatch.ID)
+					if !(task.Bulk && strings.TrimSpace(task.BatchID) != "" && task.BatchTotal > 1) {
+						a.sendMessage(task.MessageType, task.GroupID, task.UserID, fmt.Sprintf("哔咔升级：找到原画版 %s，正在从哔咔下载...", bestMatch.Title))
+					}
+					bikaCBZ, bikaErr := a.bikaDownloadComic(ctx, bestMatch.ID, "", task.MessageType, task.GroupID, task.UserID, token)
+					if bikaErr == nil && bikaCBZ != "" {
+						// 哔咔下载成功，使用哔咔的文件
+						path = bikaCBZ
+						name = filepath.Base(bikaCBZ)
+						albumTitle = bestMatch.Title
+						needDownload = false
+						log.Printf("bika upgrade: success, using bika file %s", bikaCBZ)
+					} else {
+						log.Printf("bika upgrade: failed, falling back to jm: %v", bikaErr)
+					}
+				} else {
+					log.Printf("bika upgrade: no match found on bika, using jm")
+				}
+			}
+		}
+
 		if needDownload {
 			path, name = findPDF(cfg.FileDir, task.Number, album.Title)
 			if path == "" {

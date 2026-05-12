@@ -859,3 +859,70 @@ func (a *App) bikaDownloadAndSend(comicID, chapterStr string, messageType string
 
 	a.sendMessage(messageType, groupID, userID, fmt.Sprintf("哔咔漫画下载完成：%s", comic.Title))
 }
+
+// bikaDownloadComic 下载哔咔漫画并返回CBZ文件路径（用于升级策略）
+func (a *App) bikaDownloadComic(ctx context.Context, comicID, chapterStr string, messageType string, groupID, userID int64, token string) (string, error) {
+	comic, err := a.bika.GetComicDetail(comicID, token)
+	if err != nil {
+		return "", fmt.Errorf("get comic detail failed: %v", err)
+	}
+
+	chapters, _, err := a.bika.GetChapters(comicID, 1, token)
+	if err != nil {
+		return "", fmt.Errorf("get chapters failed: %v", err)
+	}
+
+	if len(chapters) == 0 {
+		return "", fmt.Errorf("no chapters found")
+	}
+
+	cfg := a.currentConfig()
+	outputDir := cfg.CBZDir
+	if outputDir == "" {
+		outputDir = "./cbz/"
+	}
+
+	// 下载指定章节或全部章节
+	var toDownload []BikaChapter
+	if chapterStr != "" {
+		chapterNum, err := strconv.Atoi(chapterStr)
+		if err != nil {
+			return "", fmt.Errorf("invalid chapter number")
+		}
+		found := false
+		for _, ch := range chapters {
+			if ch.Order == chapterNum {
+				toDownload = append(toDownload, ch)
+				found = true
+				break
+			}
+		}
+		if !found {
+			return "", fmt.Errorf("chapter %d not found", chapterNum)
+		}
+	} else {
+		if len(chapters) > cfg.MaxEpisodes {
+			return "", fmt.Errorf("too many chapters (%d>%d)", len(chapters), cfg.MaxEpisodes)
+		}
+		toDownload = chapters
+	}
+
+	var lastCBZ string
+	for _, ch := range toDownload {
+		chCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.DownloadTimeout)*time.Second)
+		result, err := a.bika.DownloadChapter(chCtx, comicID, comic.Title, ch.Title, ch.Order, outputDir, token)
+		cancel()
+
+		if err != nil {
+			log.Printf("bika download chapter %d failed: %v", ch.Order, err)
+			continue
+		}
+		lastCBZ = result
+	}
+
+	if lastCBZ == "" {
+		return "", fmt.Errorf("all chapters download failed")
+	}
+
+	return lastCBZ, nil
+}
