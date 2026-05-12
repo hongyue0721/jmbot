@@ -743,10 +743,19 @@ func (a *App) handleBikaCommand(rawMessage, messageType string, groupID, userID 
 		return true
 	}
 
-	// /bika confirm <index> 或 确认 <index>
-	if m := mustMatch(`^(?:/bika\s+confirm|确认)\s+(\d+)$`, rawMessage); m != nil {
-		idx, _ := strconv.Atoi(m[1])
-		if idx <= 0 {
+	// /bika confirm <index> 或 确认 <index> (支持多个序号，如: 确认 1 2 3)
+	if m := mustMatch(`^(?:/bika\s+confirm|确认)\s+(.+)$`, rawMessage); m != nil {
+		// 解析所有序号
+		parts := strings.Fields(m[1])
+		var indices []int
+		for _, p := range parts {
+			idx, err := strconv.Atoi(p)
+			if err != nil || idx <= 0 {
+				continue
+			}
+			indices = append(indices, idx)
+		}
+		if len(indices) == 0 {
 			a.sendMessage(messageType, groupID, userID, "序号无效")
 			return true
 		}
@@ -763,18 +772,41 @@ func (a *App) handleBikaCommand(rawMessage, messageType string, groupID, userID 
 			a.sendMessage(messageType, groupID, userID, "没有待确认的搜索结果，请先搜索")
 			return true
 		}
-		if idx > len(pending.Results) {
-			a.sendMessage(messageType, groupID, userID, fmt.Sprintf("序号超出范围，最大为 %d", len(pending.Results)))
+
+		// 检查序号范围
+		var validComics []BikaSearchResult
+		for _, idx := range indices {
+			if idx > len(pending.Results) {
+				a.sendMessage(messageType, groupID, userID, fmt.Sprintf("序号 %d 超出范围，最大为 %d", idx, len(pending.Results)))
+				continue
+			}
+			validComics = append(validComics, pending.Results[idx-1])
+		}
+
+		if len(validComics) == 0 {
 			return true
 		}
 
-		comic := pending.Results[idx-1]
+		// 清除搜索缓存
 		bikaSearchCacheMu.Lock()
 		delete(bikaSearchCache, scope)
 		bikaSearchCacheMu.Unlock()
 
-		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("开始下载哔咔漫画：%s (ID: %s)", comic.Title, comic.ID))
-		go a.bikaDownloadAndSend(comic.ID, "", messageType, groupID, userID)
+		// 逐个下载
+		if len(validComics) == 1 {
+			comic := validComics[0]
+			a.sendMessage(messageType, groupID, userID, fmt.Sprintf("开始下载哔咔漫画：%s", comic.Title))
+			go a.bikaDownloadAndSend(comic.ID, "", messageType, groupID, userID)
+		} else {
+			names := make([]string, len(validComics))
+			for i, c := range validComics {
+				names[i] = c.Title
+			}
+			a.sendMessage(messageType, groupID, userID, fmt.Sprintf("开始下载 %d 个哔咔漫画：\n%s", len(validComics), strings.Join(names, "\n")))
+			for _, comic := range validComics {
+				go a.bikaDownloadAndSend(comic.ID, "", messageType, groupID, userID)
+			}
+		}
 		return true
 	}
 
