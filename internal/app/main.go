@@ -1550,20 +1550,8 @@ func (a *App) handleMessageEvent(data map[string]any) {
 		return
 	}
 
-	// 处理聚合搜索的确认命令
+	// 处理确认命令（支持聚合搜索和哔咔搜索）
 	if m := mustMatch(`^确认\s+(.+)$`, rawMessage); m != nil {
-		a.searchMu.Lock()
-		pending, ok := a.search[scope]
-		if ok && time.Since(pending.At) > time.Duration(a.cfg.SearchTimeout)*time.Second {
-			delete(a.search, scope)
-			ok = false
-		}
-		a.searchMu.Unlock()
-
-		if !ok {
-			return
-		}
-
 		// 解析序号
 		parts := strings.Fields(m[1])
 		var indices []int
@@ -1574,21 +1562,28 @@ func (a *App) handleMessageEvent(data map[string]any) {
 			}
 			indices = append(indices, idx)
 		}
-
 		if len(indices) == 0 {
 			return
 		}
 
-		// 处理聚合搜索结果
-		if len(pending.AggResults) > 0 {
-			// 检查序号范围
+		// 先检查聚合搜索结果
+		a.searchMu.Lock()
+		aggPending, aggOk := a.search[scope]
+		if aggOk && time.Since(aggPending.At) > time.Duration(a.cfg.SearchTimeout)*time.Second {
+			delete(a.search, scope)
+			aggOk = false
+		}
+		a.searchMu.Unlock()
+
+		if aggOk && len(aggPending.AggResults) > 0 {
+			// 处理聚合搜索结果
 			var validItems []SearchResultItem
 			for _, idx := range indices {
-				if idx > len(pending.AggResults) {
-					a.sendMessage(messageType, groupID, userID, fmt.Sprintf("序号 %d 超出范围，最大为 %d", idx, len(pending.AggResults)))
+				if idx > len(aggPending.AggResults) {
+					a.sendMessage(messageType, groupID, userID, fmt.Sprintf("序号 %d 超出范围，最大为 %d", idx, len(aggPending.AggResults)))
 					continue
 				}
-				validItems = append(validItems, pending.AggResults[idx-1])
+				validItems = append(validItems, aggPending.AggResults[idx-1])
 			}
 
 			if len(validItems) == 0 {
@@ -1626,33 +1621,138 @@ func (a *App) handleMessageEvent(data map[string]any) {
 			return
 		}
 
+		// 检查哔咔搜索结果
+		bikaSearchCacheMu.Lock()
+		bikaPending, bikaOk := bikaSearchCache[scope]
+		if bikaOk && time.Since(bikaPending.At) > 10*time.Minute {
+			delete(bikaSearchCache, scope)
+			bikaOk = false
+		}
+		bikaSearchCacheMu.Unlock()
+
+		if bikaOk && len(bikaPending.Results) > 0 {
+			// 处理哔咔搜索结果
+			var validComics []BikaSearchResult
+			for _, idx := range indices {
+				if idx > len(bikaPending.Results) {
+					a.sendMessage(messageType, groupID, userID, fmt.Sprintf("序号 %d 超出范围，最大为 %d", idx, len(bikaPending.Results)))
+					continue
+				}
+				validComics = append(validComics, bikaPending.Results[idx-1])
+			}
+
+			if len(validComics) == 0 {
+				return
+			}
+
+			// 清除搜索缓存
+			bikaSearchCacheMu.Lock()
+			delete(bikaSearchCache, scope)
+			bikaSearchCacheMu.Unlock()
+
+			// 逐个下载
+			if len(validComics) == 1 {
+				comic := validComics[0]
+				a.sendMessage(messageType, groupID, userID, fmt.Sprintf("开始下载哔咔漫画：%s", comic.Title))
+				go a.bikaDownloadAndSend(comic.ID, "", messageType, groupID, userID)
+			} else {
+				names := make([]string, len(validComics))
+				for i, c := range validComics {
+					names[i] = c.Title
+				}
+				a.sendMessage(messageType, groupID, userID, fmt.Sprintf("开始下载 %d 个哔咔漫画：\n%s", len(validComics), strings.Join(names, "\n")))
+				for _, comic := range validComics {
+					go a.bikaDownloadAndSend(comic.ID, "", messageType, groupID, userID)
+				}
+			}
+			return
+		}
+
 		// 处理普通JM搜索结果（单个）
-		if len(indices) == 1 && indices[0] == 1 && pending.AlbumID != "" {
+		a.searchMu.Lock()
+		jmPending, jmOk := a.search[scope]
+		if jmOk && time.Since(jmPending.At) > time.Duration(a.cfg.SearchTimeout)*time.Second {
+			delete(a.search, scope)
+			jmOk = false
+		}
+		a.searchMu.Unlock()
+
+		if jmOk && jmPending.AlbumID != "" && len(indices) == 1 && indices[0] == 1 {
 			a.searchMu.Lock()
 			delete(a.search, scope)
 			a.searchMu.Unlock()
-			a.sendMessage(messageType, groupID, userID, "已确认，开始处理本子："+pending.Title)
-			a.enqueueDownloads([]string{pending.AlbumID}, messageType, groupID, userID, data)
+			a.sendMessage(messageType, groupID, userID, "已确认，开始处理本子："+jmPending.Title)
+			a.enqueueDownloads([]string{jmPending.AlbumID}, messageType, groupID, userID, data)
 			return
 		}
 
 		return
 	}
 
+	// 处理"确认"（不带数字）默认为"确认 1"
 	if rawMessage == "确认" {
+		// 检查聚合搜索结果
 		a.searchMu.Lock()
-		pending, ok := a.search[scope]
-		if ok {
-			if time.Since(pending.At) <= time.Duration(a.cfg.SearchTimeout)*time.Second {
-				delete(a.search, scope)
-				a.searchMu.Unlock()
-				a.sendMessage(messageType, groupID, userID, "已确认，开始处理本子："+pending.Title)
-				a.enqueueDownloads([]string{pending.AlbumID}, messageType, groupID, userID, data)
-				return
-			}
+		aggPending, aggOk := a.search[scope]
+		if aggOk && time.Since(aggPending.At) > time.Duration(a.cfg.SearchTimeout)*time.Second {
 			delete(a.search, scope)
+			aggOk = false
 		}
 		a.searchMu.Unlock()
+
+		if aggOk && len(aggPending.AggResults) > 0 {
+			// 聚合搜索结果，下载第一个
+			item := aggPending.AggResults[0]
+			a.searchMu.Lock()
+			delete(a.search, scope)
+			a.searchMu.Unlock()
+			a.sendMessage(messageType, groupID, userID, fmt.Sprintf("开始下载：%s [%s]", item.Title, item.Source))
+			if item.Source == "Bika" {
+				go a.bikaDownloadAndSend(item.ID, "", messageType, groupID, userID)
+			} else {
+				a.enqueueDownloads([]string{item.ID}, messageType, groupID, userID, data)
+			}
+			return
+		}
+
+		// 检查哔咔搜索结果
+		bikaSearchCacheMu.Lock()
+		bikaPending, bikaOk := bikaSearchCache[scope]
+		if bikaOk && time.Since(bikaPending.At) > 10*time.Minute {
+			delete(bikaSearchCache, scope)
+			bikaOk = false
+		}
+		bikaSearchCacheMu.Unlock()
+
+		if bikaOk && len(bikaPending.Results) > 0 {
+			// 哔咔搜索结果，下载第一个
+			comic := bikaPending.Results[0]
+			bikaSearchCacheMu.Lock()
+			delete(bikaSearchCache, scope)
+			bikaSearchCacheMu.Unlock()
+			a.sendMessage(messageType, groupID, userID, fmt.Sprintf("开始下载哔咔漫画：%s", comic.Title))
+			go a.bikaDownloadAndSend(comic.ID, "", messageType, groupID, userID)
+			return
+		}
+
+		// 检查普通JM搜索结果
+		a.searchMu.Lock()
+		jmPending, jmOk := a.search[scope]
+		if jmOk && time.Since(jmPending.At) > time.Duration(a.cfg.SearchTimeout)*time.Second {
+			delete(a.search, scope)
+			jmOk = false
+		}
+		a.searchMu.Unlock()
+
+		if jmOk && jmPending.AlbumID != "" {
+			a.searchMu.Lock()
+			delete(a.search, scope)
+			a.searchMu.Unlock()
+			a.sendMessage(messageType, groupID, userID, "已确认，开始处理本子："+jmPending.Title)
+			a.enqueueDownloads([]string{jmPending.AlbumID}, messageType, groupID, userID, data)
+			return
+		}
+
 		return
 	}
 
