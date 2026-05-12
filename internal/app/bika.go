@@ -445,13 +445,13 @@ func (b *BikaClient) DownloadChapter(ctx context.Context, comicID, comicTitle, e
 	}
 	sort.Strings(imageFiles)
 
-	// 生成PDF
-	pdfPath := epDir + ".pdf"
+	// 生成PDF - 使用本子名命名
+	pdfPath := filepath.Join(filepath.Dir(epDir), comicTitle+".pdf")
 	if len(imageFiles) > 0 {
 		if err := buildPDF(pdfPath, imageFiles, ""); err != nil {
 			log.Printf("bika pdf build failed: %v", err)
 			// 回退到CBZ
-			cbzPath := epDir + ".cbz"
+			cbzPath := filepath.Join(filepath.Dir(epDir), comicTitle+".cbz")
 			if err := zipDirToCBZ(epDir, cbzPath); err != nil {
 				return epDir, nil
 			}
@@ -463,7 +463,7 @@ func (b *BikaClient) DownloadChapter(ctx context.Context, comicID, comicTitle, e
 	}
 
 	// 没有图片，回退到CBZ
-	cbzPath := epDir + ".cbz"
+	cbzPath := filepath.Join(filepath.Dir(epDir), comicTitle+".cbz")
 	if err := zipDirToCBZ(epDir, cbzPath); err != nil {
 		return epDir, nil
 	}
@@ -905,6 +905,8 @@ func (a *App) bikaDownloadAndSend(comicID, chapterStr string, messageType string
 	// 并发下载章节
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 3) // 最多3个并发
+	successCount := 0
+	var mu sync.Mutex
 
 	for _, ch := range toDownload {
 		wg.Add(1)
@@ -913,16 +915,18 @@ func (a *App) bikaDownloadAndSend(comicID, chapterStr string, messageType string
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			a.sendMessage(messageType, groupID, userID, fmt.Sprintf("正在下载：%s 第%d话 %s", comic.Title, ch.Order, ch.Title))
-
 			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.DownloadTimeout)*time.Second)
 			result, err := a.bika.DownloadChapter(ctx, comicID, comic.Title, ch.Title, ch.Order, outputDir, token)
 			cancel()
 
 			if err != nil {
-				a.sendMessage(messageType, groupID, userID, fmt.Sprintf("下载失败：第%d话 %s - %v", ch.Order, ch.Title, err))
+				log.Printf("bika download chapter %d failed: %v", ch.Order, err)
 				return
 			}
+
+			mu.Lock()
+			successCount++
+			mu.Unlock()
 
 			// 发送文件
 			ok := false
@@ -933,14 +937,17 @@ func (a *App) bikaDownloadAndSend(comicID, chapterStr string, messageType string
 			}
 
 			if !ok {
-				failMsg := fmt.Sprintf("文件发送失败：%s 第%d话", comic.Title, ch.Order)
-				a.sendMessage(messageType, groupID, userID, failMsg)
+				log.Printf("bika send file failed: %s ch%d", comic.Title, ch.Order)
 			}
 		}(ch)
 	}
 
 	wg.Wait()
-	a.sendMessage(messageType, groupID, userID, fmt.Sprintf("哔咔漫画下载完成：%s", comic.Title))
+	if successCount > 0 {
+		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("哔咔下载完成：%s（%d话）", comic.Title, successCount))
+	} else {
+		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("哔咔下载失败：%s", comic.Title))
+	}
 }
 
 // bikaDownloadComic 下载哔咔漫画并返回CBZ文件路径（用于升级策略）
