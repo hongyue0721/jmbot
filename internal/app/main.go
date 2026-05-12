@@ -1477,7 +1477,9 @@ func (a *App) handleMessageEvent(data map[string]any) {
 			token := a.getBikaUserToken(userID)
 			if token != "" {
 				results, _, err := a.bika.Search(keyword, 1, token)
-				if err == nil && len(results) > 0 {
+				if err != nil {
+					log.Printf("[Search] 哔咔搜索失败: %v", err)
+				} else if len(results) > 0 {
 					for _, r := range results {
 						allResults = append(allResults, SearchResultItem{
 							Source: "Bika",
@@ -1488,6 +1490,8 @@ func (a *App) handleMessageEvent(data map[string]any) {
 						})
 					}
 				}
+			} else {
+				log.Printf("[Search] 用户未登录哔咔，跳过哔咔搜索")
 			}
 		}
 
