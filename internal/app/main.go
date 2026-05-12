@@ -1850,6 +1850,8 @@ func (a *App) processTask(task DownloadTask) {
 		a.finishBulkTask(task, result)
 	}()
 
+	downloadSource := "JM" // 标记下载来源：JM 或 Bika
+
 	notify := func(message string) {
 		if task.Bulk && strings.TrimSpace(task.BatchID) != "" && task.BatchTotal > 1 {
 			if result.FailMsg == "" {
@@ -1997,6 +1999,7 @@ func (a *App) processTask(task DownloadTask) {
 						name = filepath.Base(bikaCBZ)
 						albumTitle = bestMatch.Title
 						needDownload = false
+						downloadSource = "Bika"
 						log.Printf("bika upgrade: success, using bika file %s", bikaCBZ)
 					} else {
 						log.Printf("bika upgrade: failed, falling back to jm: %v", bikaErr)
@@ -2098,13 +2101,14 @@ func (a *App) processTask(task DownloadTask) {
 	}
 
 	baseName := sanitizeFileName(albumTitle)
-	if nameMode == "jm" {
-		baseName = "JM" + task.Number
+	// JM下载的文件加 jmxxxx_ 前缀，Bika下载的用本子名
+	if downloadSource == "JM" {
+		baseName = fmt.Sprintf("JM%s_%s", task.Number, baseName)
 	}
 	if encEnabled && strings.TrimSpace(password) != "" {
 		baseName = fmt.Sprintf("%s_%s", baseName, sanitizeFileName(password))
 	}
-	if nameMode == "jm" || nameMode == "full" {
+	if nameMode == "jm" || nameMode == "full" || downloadSource == "JM" {
 		renamed, renamedCleanup, err := cloneWithName(sendPath, baseName)
 		if err == nil && renamed != sendPath {
 			sendPath = renamed
@@ -2113,7 +2117,7 @@ func (a *App) processTask(task DownloadTask) {
 			}
 		}
 	}
-	if nameMode == "current" {
+	if nameMode == "current" && downloadSource != "JM" {
 		ext := strings.ToLower(filepath.Ext(sendPath))
 		if ext == ".zip" || ext == ".cbz" {
 			hashPath, hashCleanup, err := randomizeHash(sendPath)
@@ -2129,7 +2133,7 @@ func (a *App) processTask(task DownloadTask) {
 	if strings.HasSuffix(strings.ToLower(sendPath), ".zip") || strings.HasSuffix(strings.ToLower(sendPath), ".cbz") {
 		label = "ZIP"
 	}
-	msg := fmt.Sprintf("正在发送：\n车牌号：%s\n本子名：%s\n文件类型：%s\n文件大小：(%.2fMB)", task.Number, albumTitle, label, sizeMB)
+	msg := fmt.Sprintf("正在发送：\n车牌号：%s\n本子名：%s\n来源：%s\n文件类型：%s\n文件大小：(%.2fMB)", task.Number, albumTitle, downloadSource, label, sizeMB)
 	if encEnabled {
 		msg += "\n密码：" + password
 	}
@@ -2153,11 +2157,17 @@ func (a *App) processTask(task DownloadTask) {
 		for _, c := range cleanup {
 			_ = os.Remove(c)
 		}
-		// 发送成功后删除原始PDF文件和manga目录以节省空间（CBZ已保留）
+		// 发送成功后删除非cbz文件和manga目录以节省空间
 		if ok {
+			// 删除原始PDF文件
 			if strings.EqualFold(filepath.Ext(path), ".pdf") && fileExists(path) {
 				_ = os.Remove(path)
 				log.Printf("deleted original PDF after send: %s", path)
+			}
+			// 删除非cbz的发送文件（如果发送的是zip/pdf等）
+			if !strings.EqualFold(filepath.Ext(sendPath), ".cbz") && fileExists(sendPath) {
+				_ = os.Remove(sendPath)
+				log.Printf("deleted non-cbz file after send: %s", sendPath)
 			}
 			a.deleteMangaDirByID(normalizeJMID(task.Number))
 		}
