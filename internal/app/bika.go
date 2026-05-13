@@ -939,6 +939,8 @@ func (a *App) bikaDownloadAndSend(comicID, chapterStr string, messageType string
 
 			if !ok {
 				log.Printf("bika send file failed: %s ch%d", comic.Title, ch.Order)
+				// 通知管理员
+				a.notifyAdminSendFailure(groupID, comicID, comic.Title, result)
 			}
 		}(ch)
 	}

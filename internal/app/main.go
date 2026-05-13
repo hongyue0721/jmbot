@@ -2530,6 +2530,8 @@ func (a *App) processTask(task DownloadTask) {
 		if !ok {
 			failMsg := "文件发送失败\n可在线预览/下载：" + a.previewPublicURL(task.Number)
 			a.sendMessage(task.MessageType, task.GroupID, task.UserID, failMsg)
+			// 通知管理员
+			a.notifyAdminSendFailure(task.GroupID, task.Number, albumTitle, sendPath)
 		}
 		for _, c := range cleanup {
 			_ = os.Remove(c)
@@ -2625,6 +2627,20 @@ func (a *App) notifyAdminDownloadFailure(groupID int64, jmNumber, reason string)
 	}
 	now := time.Now().Format("2006-01-02 15:04:05")
 	msg := fmt.Sprintf("【下载失败通知】\n群号: %d\nJM号: %s\n申请时间: %s\n失败原因: %s", groupID, jmNumber, now, reason)
+	_ = a.bot.SendPrivateMessage(adminID, msg)
+}
+
+func (a *App) notifyAdminSendFailure(groupID int64, jmNumber, title, filePath string) {
+	cfg := a.currentConfig()
+	adminID := cfg.AdminID
+	if adminID == 0 {
+		return
+	}
+	now := time.Now().Format("2006-01-02 15:04:05")
+	fileName := filepath.Base(filePath)
+ fileSize := fileSizeMB(filePath)
+	msg := fmt.Sprintf("【发送失败通知】\n群号: %d\n本子号: %s\n本子名: %s\n文件名: %s\n文件大小: %.2fMB\n时间: %s",
+		groupID, jmNumber, title, fileName, fileSize, now)
 	_ = a.bot.SendPrivateMessage(adminID, msg)
 }
 
