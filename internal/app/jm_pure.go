@@ -1037,13 +1037,17 @@ func buildPDF(outFile string, imageFiles []string, password string) error {
 		hmm := float64(cfg.Height) * pixelToMM
 
 		// 始终使用纵向，通过SizeType控制实际尺寸
-		// gofpdf会根据Wd和Ht自动判断方向
 		pdf.AddPageFormat("P", gofpdf.SizeType{Wd: wmm, Ht: hmm})
 		
-		imgType := strings.ToUpper(strings.TrimPrefix(filepath.Ext(file), "."))
-		if imgType == "" {
-			imgType = "PNG"
+		// 检测图片类型
+		ext := strings.ToLower(filepath.Ext(file))
+		imgType := "PNG"
+		if ext == ".jpg" || ext == ".jpeg" {
+			imgType = "JPG"
+		} else if ext == ".webp" {
+			imgType = "WEBP"
 		}
+
 		// 图片填满页面
 		pdf.ImageOptions(file, 0, 0, wmm, hmm, false, gofpdf.ImageOptions{ImageType: imgType}, 0, "")
 	}
