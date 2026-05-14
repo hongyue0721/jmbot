@@ -1032,22 +1032,19 @@ func buildPDF(outFile string, imageFiles []string, password string) error {
 			return err
 		}
 
-		// 页面尺寸 = 图片尺寸，完美匹配
+		// 页面尺寸 = 图片尺寸
 		wmm := float64(cfg.Width) * pixelToMM
 		hmm := float64(cfg.Height) * pixelToMM
 
-		// 根据图片方向设置页面方向
-		orientation := "P"
-		if cfg.Width > cfg.Height {
-			orientation = "L"
-		}
-
-		pdf.AddPageFormat(orientation, gofpdf.SizeType{Wd: wmm, Ht: hmm})
+		// 始终使用纵向，通过SizeType控制实际尺寸
+		// gofpdf会根据Wd和Ht自动判断方向
+		pdf.AddPageFormat("P", gofpdf.SizeType{Wd: wmm, Ht: hmm})
+		
 		imgType := strings.ToUpper(strings.TrimPrefix(filepath.Ext(file), "."))
 		if imgType == "" {
 			imgType = "PNG"
 		}
-		// 图片填满页面，完美匹配
+		// 图片填满页面
 		pdf.ImageOptions(file, 0, 0, wmm, hmm, false, gofpdf.ImageOptions{ImageType: imgType}, 0, "")
 	}
 	return pdf.OutputFileAndClose(outFile)
