@@ -357,7 +357,7 @@ func (b *BikaClient) GetChapterImages(comicID string, order, page int, token str
 	return resp.Data.Pages.Docs, resp.Data.Pages.Total, nil
 }
 
-func (b *BikaClient) DownloadChapter(ctx context.Context, comicID, comicTitle, epTitle string, epOrder int, outputDir, token string) (string, error) {
+func (b *BikaClient) DownloadChapter(ctx context.Context, comicID, comicTitle, epTitle string, epOrder int, outputDir, token string, quality string) (string, error) {
 	comicTitle = sanitizeBikaFilename(strings.TrimSpace(comicTitle))
 	epTitle = sanitizeBikaFilename(strings.TrimSpace(epTitle))
 	epDir := filepath.Join(outputDir, fmt.Sprintf("bika_%s", comicID), fmt.Sprintf("%d_%s", epOrder, epTitle))
@@ -413,7 +413,7 @@ func (b *BikaClient) DownloadChapter(ctx context.Context, comicID, comicTitle, e
 			imageURL := buildBikaImageURL(p.Media.FileServer, p.Media.Path)
 			filename := filepath.Join(epDir, fmt.Sprintf("%03d_%s", idx+1, p.Media.OriginalName))
 
-			if err := downloadBikaFile(imageURL, filename, token); err != nil {
+			if err := downloadBikaFile(imageURL, filename, token, quality); err != nil {
 				atomic.AddInt32(&failCount, 1)
 				log.Printf("bika download image failed [%s]: %v", filename, err)
 			} else {
@@ -475,7 +475,7 @@ func buildBikaImageURL(fileServer, path string) string {
 	return strings.ReplaceAll(directURL, "picacomic", "go2778")
 }
 
-func downloadBikaFile(url, filepath, token string) error {
+func downloadBikaFile(url, filepath, token string, quality string) error {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return err
@@ -493,6 +493,13 @@ func downloadBikaFile(url, filepath, token string) error {
 
 	if token != "" {
 		req.Header.Set("authorization", token)
+	}
+
+	// 设置画质
+	if quality != "" {
+		req.Header.Set("image-quality", quality)
+	} else {
+		req.Header.Set("image-quality", "original")
 	}
 
 	client := &http.Client{Timeout: 120 * time.Second}
@@ -870,6 +877,12 @@ func (a *App) bikaDownloadAndSend(comicID, chapterStr string, messageType string
 		outputDir = "./cbz/"
 	}
 
+	// 获取画质配置
+	quality := cfg.BikaQuality
+	if quality == "" {
+		quality = "original"
+	}
+
 	// 下载指定章节或全部章节
 	var toDownload []BikaChapter
 	if chapterStr != "" {
@@ -916,7 +929,7 @@ func (a *App) bikaDownloadAndSend(comicID, chapterStr string, messageType string
 			var err error
 			for retry := 0; retry < 3; retry++ {
 				ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.DownloadTimeout)*time.Second)
-				result, err = a.bika.DownloadChapter(ctx, comicID, comic.Title, ch.Title, ch.Order, outputDir, token)
+				result, err = a.bika.DownloadChapter(ctx, comicID, comic.Title, ch.Title, ch.Order, outputDir, token, quality)
 				cancel()
 
 				if err == nil {
@@ -973,7 +986,7 @@ func (a *App) bikaDownloadAndSend(comicID, chapterStr string, messageType string
 }
 
 // bikaDownloadComic 下载哔咔漫画并返回CBZ文件路径（用于升级策略）
-func (a *App) bikaDownloadComic(ctx context.Context, comicID, chapterStr string, messageType string, groupID, userID int64, token string) (string, error) {
+func (a *App) bikaDownloadComic(ctx context.Context, comicID, chapterStr string, messageType string, groupID, userID int64, token string, quality string) (string, error) {
 	comic, err := a.bika.GetComicDetail(comicID, token)
 	if err != nil {
 		return "", fmt.Errorf("get comic detail failed: %v", err)
@@ -1022,7 +1035,7 @@ func (a *App) bikaDownloadComic(ctx context.Context, comicID, chapterStr string,
 	// 单章节直接下载
 	if len(toDownload) == 1 {
 		chCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.DownloadTimeout)*time.Second)
-		result, err := a.bika.DownloadChapter(chCtx, comicID, comic.Title, toDownload[0].Title, toDownload[0].Order, outputDir, token)
+		result, err := a.bika.DownloadChapter(chCtx, comicID, comic.Title, toDownload[0].Title, toDownload[0].Order, outputDir, token, quality)
 		cancel()
 		if err != nil {
 			return "", fmt.Errorf("download chapter failed: %v", err)
@@ -1056,7 +1069,7 @@ func (a *App) bikaDownloadComic(ctx context.Context, comicID, chapterStr string,
 			for idx, p := range pages {
 				imageURL := buildBikaImageURL(p.Media.FileServer, p.Media.Path)
 				filename := filepath.Join(chapterDir, fmt.Sprintf("%03d_%s", idx+1, p.Media.OriginalName))
-				_ = downloadBikaFile(imageURL, filename, token)
+				_ = downloadBikaFile(imageURL, filename, token, quality)
 			}
 			if page >= total {
 				break

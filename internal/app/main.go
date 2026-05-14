@@ -2339,7 +2339,7 @@ func (a *App) processTask(task DownloadTask) {
 					if !(task.Bulk && strings.TrimSpace(task.BatchID) != "" && task.BatchTotal > 1) {
 						a.sendMessage(task.MessageType, task.GroupID, task.UserID, fmt.Sprintf("哔咔升级：找到原画版 %s，正在从哔咔下载...", bestMatch.Title))
 					}
-					bikaCBZ, bikaErr := a.bikaDownloadComic(ctx, bestMatch.ID, "", task.MessageType, task.GroupID, task.UserID, token)
+					bikaCBZ, bikaErr := a.bikaDownloadComic(ctx, bestMatch.ID, "", task.MessageType, task.GroupID, task.UserID, token, cfg.BikaQuality)
 					if bikaErr != nil {
 						log.Printf("[Bika] 下载失败: %v", bikaErr)
 					}
