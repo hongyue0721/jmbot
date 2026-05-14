@@ -471,8 +471,14 @@ func buildBikaImageURL(fileServer, path string) string {
 	// 去掉图片处理参数，获取原画
 	// 原始path: tobeimg/xxx/rs:fit:800:800:0/g:ce/base64url.jpg
 	// 原画path: tobeimg/xxx/g:ce/base64url.jpg 或 tobeimg/xxx/base64url.jpg
+	originalPath := path
 	if idx := strings.Index(path, "/rs:"); idx >= 0 {
 		path = path[:idx] + path[strings.Index(path[idx:], "/"):]
+	}
+	
+	// 添加日志
+	if originalPath != path {
+		log.Printf("[Bika] 图片URL处理: 原始=%s, 处理后=%s", originalPath[:50]+"...", path[:50]+"...")
 	}
 	
 	if strings.Contains(fileServer, "go2778") || strings.Contains(fileServer, "static") {
