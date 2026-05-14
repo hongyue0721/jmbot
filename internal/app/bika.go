@@ -445,31 +445,19 @@ func (b *BikaClient) DownloadChapter(ctx context.Context, comicID, comicTitle, e
 	}
 	sort.Strings(imageFiles)
 
-	// 先生成PDF用于发送
+	// 生成PDF
 	pdfPath := filepath.Join(filepath.Dir(epDir), comicTitle+".pdf")
-	pdfOK := false
 	if len(imageFiles) > 0 {
 		if err := buildPDF(pdfPath, imageFiles, ""); err != nil {
-			log.Printf("bika pdf build failed: %v", err)
-		} else {
-			pdfOK = true
+			os.RemoveAll(epDir)
+			return "", fmt.Errorf("pdf build failed: %v", err)
 		}
-	}
-
-	// 生成CBZ并保留
-	cbzPath := filepath.Join(filepath.Dir(epDir), comicTitle+".cbz")
-	if err := zipDirToCBZ(epDir, cbzPath); err != nil {
-		log.Printf("bika cbz build failed: %v", err)
-	}
-
-	// 删除临时图片目录
-	os.RemoveAll(epDir)
-
-	// 返回PDF或CBZ
-	if pdfOK {
+		os.RemoveAll(epDir)
 		return pdfPath, nil
 	}
-	return cbzPath, nil
+
+	os.RemoveAll(epDir)
+	return "", fmt.Errorf("no images found")
 }
 
 func buildBikaImageURL(fileServer, path string) string {
@@ -916,12 +904,24 @@ func (a *App) bikaDownloadAndSend(comicID, chapterStr string, messageType string
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.DownloadTimeout)*time.Second)
-			result, err := a.bika.DownloadChapter(ctx, comicID, comic.Title, ch.Title, ch.Order, outputDir, token)
-			cancel()
+			// 下载并生成PDF
+			var result string
+			var err error
+			for retry := 0; retry < 3; retry++ {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.DownloadTimeout)*time.Second)
+				result, err = a.bika.DownloadChapter(ctx, comicID, comic.Title, ch.Title, ch.Order, outputDir, token)
+				cancel()
+
+				if err == nil {
+					break
+				}
+				log.Printf("bika download chapter %d retry %d failed: %v", ch.Order, retry+1, err)
+			}
 
 			if err != nil {
-				log.Printf("bika download chapter %d failed: %v", ch.Order, err)
+				log.Printf("bika download chapter %d failed after 3 retries: %v", ch.Order, err)
+				a.sendMessage(messageType, groupID, userID, fmt.Sprintf("下载失败：%s 第%d话 - %v", comic.Title, ch.Order, err))
+				a.notifyAdminDownloadFailure(groupID, comicID, fmt.Sprintf("哔咔下载失败: %s 第%d话 - %v", comic.Title, ch.Order, err))
 				return
 			}
 
@@ -929,18 +929,30 @@ func (a *App) bikaDownloadAndSend(comicID, chapterStr string, messageType string
 			successCount++
 			mu.Unlock()
 
-			// 发送文件
-			ok := false
-			if messageType == "group" {
-				ok = a.bot.SendGroupFile(cfg, groupID, result)
-			} else {
-				ok = a.bot.SendPrivateFile(cfg, userID, result)
+			// 发送文件，重试3次
+			sendOK := false
+			for retry := 0; retry < 3; retry++ {
+				if messageType == "group" {
+					sendOK = a.bot.SendGroupFile(cfg, groupID, result)
+				} else {
+					sendOK = a.bot.SendPrivateFile(cfg, userID, result)
+				}
+				if sendOK {
+					break
+				}
+				log.Printf("bika send file retry %d: %s ch%d", retry+1, comic.Title, ch.Order)
+				time.Sleep(2 * time.Second)
 			}
 
-			if !ok {
-				log.Printf("bika send file failed: %s ch%d", comic.Title, ch.Order)
-				// 通知管理员
+			if !sendOK {
+				log.Printf("bika send file failed after 3 retries: %s ch%d", comic.Title, ch.Order)
+				a.sendMessage(messageType, groupID, userID, fmt.Sprintf("文件发送失败：%s 第%d话", comic.Title, ch.Order))
 				a.notifyAdminSendFailure(groupID, comicID, comic.Title, result)
+			}
+
+			// 发送成功后删除PDF
+			if sendOK {
+				_ = os.Remove(result)
 			}
 		}(ch)
 	}
