@@ -1035,18 +1035,23 @@ func buildPDF(outFile string, imageFiles []string, password string) error {
 		wmm := float64(cfg.Width) * pixelToMM
 		hmm := float64(cfg.Height) * pixelToMM
 
-		// 根据图片宽高比设置页面方向
+		// 始终使用纵向页面，对于横向图片交换宽高
 		orientation := "P"
+		pageW := wmm
+		pageH := hmm
 		if cfg.Width > cfg.Height {
-			orientation = "L"
+			// 横向图片：交换宽高作为页面尺寸
+			pageW = hmm
+			pageH = wmm
 		}
 
-		pdf.AddPageFormat(orientation, gofpdf.SizeType{Wd: wmm, Ht: hmm})
+		pdf.AddPageFormat(orientation, gofpdf.SizeType{Wd: pageW, Ht: pageH})
 		imgType := strings.ToUpper(strings.TrimPrefix(filepath.Ext(file), "."))
 		if imgType == "" {
 			imgType = "PNG"
 		}
-		pdf.ImageOptions(file, 0, 0, wmm, hmm, false, gofpdf.ImageOptions{ImageType: imgType}, 0, "")
+		// 图片填满整个页面
+		pdf.ImageOptions(file, 0, 0, pageW, pageH, false, gofpdf.ImageOptions{ImageType: imgType}, 0, "")
 	}
 	return pdf.OutputFileAndClose(outFile)
 }
