@@ -1032,52 +1032,23 @@ func buildPDF(outFile string, imageFiles []string, password string) error {
 			return err
 		}
 
+		// 页面尺寸 = 图片尺寸，完美匹配
 		wmm := float64(cfg.Width) * pixelToMM
 		hmm := float64(cfg.Height) * pixelToMM
 
-		// 始终使用纵向页面
+		// 根据图片方向设置页面方向
 		orientation := "P"
-		
-		// 对于横向图片，交换宽高作为页面尺寸
-		pageW := wmm
-		pageH := hmm
 		if cfg.Width > cfg.Height {
-			pageW = hmm
-			pageH = wmm
+			orientation = "L"
 		}
 
-		pdf.AddPageFormat(orientation, gofpdf.SizeType{Wd: pageW, Ht: pageH})
+		pdf.AddPageFormat(orientation, gofpdf.SizeType{Wd: wmm, Ht: hmm})
 		imgType := strings.ToUpper(strings.TrimPrefix(filepath.Ext(file), "."))
 		if imgType == "" {
 			imgType = "PNG"
 		}
-
-		// 计算图片在页面中的位置，保持原始比例居中显示
-		imgW := pageW
-		imgH := pageH
-		
-		// 对于横向图片，需要计算正确的显示尺寸
-		if cfg.Width > cfg.Height {
-			// 图片原始比例
-			imgRatio := float64(cfg.Width) / float64(cfg.Height)
-			pageRatio := pageW / pageH
-			
-			if imgRatio > pageRatio {
-				// 图片更宽，以页面宽度为准
-				imgW = pageW
-				imgH = pageW / imgRatio
-			} else {
-				// 图片更高，以页面高度为准
-				imgH = pageH
-				imgW = pageH * imgRatio
-			}
-		}
-
-		// 居中显示
-		x := (pageW - imgW) / 2
-		y := (pageH - imgH) / 2
-
-		pdf.ImageOptions(file, x, y, imgW, imgH, false, gofpdf.ImageOptions{ImageType: imgType}, 0, "")
+		// 图片填满页面，完美匹配
+		pdf.ImageOptions(file, 0, 0, wmm, hmm, false, gofpdf.ImageOptions{ImageType: imgType}, 0, "")
 	}
 	return pdf.OutputFileAndClose(outFile)
 }
