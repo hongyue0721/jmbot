@@ -1021,11 +1021,6 @@ func buildPDF(outFile string, imageFiles []string, password string) error {
 		pdf.SetProtection(byte(perm), password, password)
 	}
 
-	// 最大页面尺寸限制（mm）
-	const maxPageW = 210  // A4宽度
-	const maxPageH = 297  // A4高度
-	const maxWidth = 420  // A3宽度（横向最大）
-
 	for _, file := range imageFiles {
 		f, err := os.Open(file)
 		if err != nil {
@@ -1040,29 +1035,10 @@ func buildPDF(outFile string, imageFiles []string, password string) error {
 		wmm := float64(cfg.Width) * pixelToMM
 		hmm := float64(cfg.Height) * pixelToMM
 
-		// 对于超宽图片（如16:9横向），调整为合适的页面尺寸
-		if wmm > maxWidth {
-			ratio := maxWidth / wmm
-			wmm = maxWidth
-			hmm = hmm * ratio
-		}
-
+		// 根据图片宽高比设置页面方向
 		orientation := "P"
-		if wmm > hmm {
+		if cfg.Width > cfg.Height {
 			orientation = "L"
-			// 横向图片：确保高度不超过A4高度
-			if hmm > maxPageH {
-				ratio := maxPageH / hmm
-				hmm = maxPageH
-				wmm = wmm * ratio
-			}
-		} else {
-			// 纵向图片：确保宽度不超过A4宽度
-			if wmm > maxPageW {
-				ratio := maxPageW / wmm
-				wmm = maxPageW
-				hmm = hmm * ratio
-			}
 		}
 
 		pdf.AddPageFormat(orientation, gofpdf.SizeType{Wd: wmm, Ht: hmm})
