@@ -965,29 +965,10 @@ func (a *App) bikaDownloadAndSend(comicID, chapterStr string, messageType string
 			// 使用转发消息发送（包含基本信息、封面、文件）
 			infoMsg := fmt.Sprintf("车牌号：%s\n本子名：%s\n来源：Bika\n章节：%d话 %s\n文件类型：PDF", comicID, comic.Title, ch.Order, ch.Title)
 			coverPath := ""
-			if mangaPath, ok, _ := a.findMangaPageByID("", 1); ok && fileExists(mangaPath) {
-				coverPath = mangaPath
-			}
+			// 哔咔没有本地manga目录，不获取封面
 			sendOK := a.sendComicForwardMessage(messageType, groupID, userID, infoMsg, coverPath, result, cfg)
 			if !sendOK {
-				// 回退到普通发送
-				for retry := 0; retry < 3; retry++ {
-					if messageType == "group" {
-						sendOK = a.bot.SendGroupFile(cfg, groupID, result)
-					} else {
-						sendOK = a.bot.SendPrivateFile(cfg, userID, result)
-					}
-					if sendOK {
-						break
-					}
-					log.Printf("bika send file retry %d: %s ch%d", retry+1, comic.Title, ch.Order)
-					time.Sleep(2 * time.Second)
-				}
-			}
-
-			if !sendOK {
-				log.Printf("bika send file failed after 3 retries: %s ch%d", comic.Title, ch.Order)
-				a.sendMessage(messageType, groupID, userID, fmt.Sprintf("文件发送失败：%s 第%d话", comic.Title, ch.Order))
+				log.Printf("bika send forward message failed: %s ch%d", comic.Title, ch.Order)
 				a.notifyAdminSendFailure(groupID, comicID, comic.Title, result)
 			}
 
