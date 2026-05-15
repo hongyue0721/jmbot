@@ -962,19 +962,27 @@ func (a *App) bikaDownloadAndSend(comicID, chapterStr string, messageType string
 			successCount++
 			mu.Unlock()
 
-			// 发送文件，重试3次
-			sendOK := false
-			for retry := 0; retry < 3; retry++ {
-				if messageType == "group" {
-					sendOK = a.bot.SendGroupFile(cfg, groupID, result)
-				} else {
-					sendOK = a.bot.SendPrivateFile(cfg, userID, result)
+			// 使用转发消息发送（包含基本信息、封面、文件）
+			infoMsg := fmt.Sprintf("车牌号：%s\n本子名：%s\n来源：Bika\n章节：%d话 %s\n文件类型：PDF", comicID, comic.Title, ch.Order, ch.Title)
+			coverPath := ""
+			if mangaPath, ok, _ := a.findMangaPageByID("", 1); ok && fileExists(mangaPath) {
+				coverPath = mangaPath
+			}
+			sendOK := a.sendComicForwardMessage(messageType, groupID, userID, infoMsg, coverPath, result, cfg)
+			if !sendOK {
+				// 回退到普通发送
+				for retry := 0; retry < 3; retry++ {
+					if messageType == "group" {
+						sendOK = a.bot.SendGroupFile(cfg, groupID, result)
+					} else {
+						sendOK = a.bot.SendPrivateFile(cfg, userID, result)
+					}
+					if sendOK {
+						break
+					}
+					log.Printf("bika send file retry %d: %s ch%d", retry+1, comic.Title, ch.Order)
+					time.Sleep(2 * time.Second)
 				}
-				if sendOK {
-					break
-				}
-				log.Printf("bika send file retry %d: %s ch%d", retry+1, comic.Title, ch.Order)
-				time.Sleep(2 * time.Second)
 			}
 
 			if !sendOK {
