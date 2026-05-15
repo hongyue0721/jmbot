@@ -181,6 +181,7 @@ type bulkTaskResult struct {
 	BatchIndex int
 	Number     string
 	Message    string
+	CoverPath  string // 封面图片路径
 	FilePath   string
 	OrigPDF    string // 原始PDF路径，用于发送后删除
 	Cleanup    []string
@@ -2510,23 +2511,32 @@ func (a *App) processTask(task DownloadTask) {
 	if strings.HasSuffix(strings.ToLower(sendPath), ".zip") || strings.HasSuffix(strings.ToLower(sendPath), ".cbz") {
 		label = "ZIP"
 	}
-	msg := fmt.Sprintf("正在发送：\n车牌号：%s\n本子名：%s\n来源：%s\n文件类型：%s\n文件大小：(%.2fMB)", task.Number, albumTitle, downloadSource, label, sizeMB)
+
+	// 基本信息消息
+	infoMsg := fmt.Sprintf("车牌号：%s\n本子名：%s\n来源：%s\n文件类型：%s\n文件大小：(%.2fMB)", task.Number, albumTitle, downloadSource, label, sizeMB)
 	if encEnabled {
-		msg += "\n密码：" + password
+		infoMsg += "\n密码：" + password
 	}
+
+	// 获取封面路径
+	coverPath := ""
+	if mangaPath, ok, _ := a.findMangaPageByID(normalizeJMID(task.Number), 1); ok && fileExists(mangaPath) {
+		coverPath = mangaPath
+	}
+
+	// 发送函数
+	sendFunc := func() bool {
+		return a.sendComicForwardMessage(task.MessageType, task.GroupID, task.UserID, infoMsg, coverPath, sendPath, cfg)
+	}
+
 	if task.Bulk && strings.TrimSpace(task.BatchID) != "" && task.BatchTotal > 1 {
-		result.Message = msg
+		result.Message = infoMsg
+		result.CoverPath = coverPath
 		result.FilePath = sendPath
 		result.OrigPDF = path
 		result.Cleanup = append(result.Cleanup, cleanup...)
 	} else {
-		a.sendMessage(task.MessageType, task.GroupID, task.UserID, msg)
-		ok := false
-		if task.MessageType == "group" {
-			ok = a.bot.SendGroupFile(cfg, task.GroupID, sendPath)
-		} else {
-			ok = a.bot.SendPrivateFile(cfg, task.UserID, sendPath)
-		}
+		ok := sendFunc()
 		if !ok {
 			failMsg := "文件发送失败\n可在线预览/下载：" + a.previewPublicURL(task.Number)
 			a.sendMessage(task.MessageType, task.GroupID, task.UserID, failMsg)
@@ -2644,6 +2654,101 @@ func (a *App) notifyAdminSendFailure(groupID int64, jmNumber, title, filePath st
 	_ = a.bot.SendPrivateMessage(adminID, msg)
 }
 
+// sendComicForwardMessage 发送包含基本信息、封面和文件的转发消息
+func (a *App) sendComicForwardMessage(messageType string, groupID, userID int64, infoMsg, coverPath, filePath string, cfg Config) bool {
+	senderID := cfg.CardUserID
+	nickname := cfg.CardNickname
+	if senderID <= 0 {
+		senderID = 10000
+	}
+	if nickname == "" {
+		nickname = "文件助手"
+	}
+
+	// 准备文件
+	coverPrepared := false
+	filePrepared := false
+
+	nodes := make([]map[string]any, 0, 3)
+
+	// 第一个节点：基本信息
+	nodes = append(nodes, map[string]any{
+		"type": "node",
+		"data": map[string]any{
+			"user_id":  senderID,
+			"nickname": nickname,
+			"content": []map[string]any{
+				{"type": "text", "data": map[string]any{"text": infoMsg}},
+			},
+		},
+	})
+
+	// 第二个节点：封面图片
+	if coverPath != "" && fileExists(coverPath) {
+		if pf, err := a.bot.prepareForwardFile(cfg, coverPath); err == nil && len(pf.candidates) > 0 {
+			coverPrepared = true
+			nodes = append(nodes, map[string]any{
+				"type": "node",
+				"data": map[string]any{
+					"user_id":  senderID,
+					"nickname": nickname,
+					"content": []map[string]any{
+						{"type": "image", "data": map[string]any{"file": pf.candidates[0]}},
+					},
+				},
+			})
+		}
+	}
+	if !coverPrepared {
+		nodes = append(nodes, map[string]any{
+			"type": "node",
+			"data": map[string]any{
+				"user_id":  senderID,
+				"nickname": nickname,
+				"content": []map[string]any{
+					{"type": "text", "data": map[string]any{"text": "（封面预览不可用）"}},
+				},
+			},
+		})
+	}
+
+	// 第三个节点：文件
+	if filePath != "" && fileExists(filePath) {
+		if pf, err := a.bot.prepareForwardFile(cfg, filePath); err == nil && len(pf.candidates) > 0 {
+			filePrepared = true
+			nodes = append(nodes, map[string]any{
+				"type": "node",
+				"data": map[string]any{
+					"user_id":  senderID,
+					"nickname": nickname,
+					"content": []map[string]any{
+						{"type": "file", "data": map[string]any{"file": pf.candidates[0]}},
+					},
+				},
+			})
+		}
+	}
+	if !filePrepared {
+		return false
+	}
+
+	// 发送转发消息
+	var action string
+	var baseParams map[string]any
+	if messageType == "group" {
+		action = "send_group_forward_msg"
+		baseParams = map[string]any{"group_id": groupID}
+	} else {
+		action = "send_private_forward_msg"
+		baseParams = map[string]any{"user_id": userID}
+	}
+
+	params := copyMap(baseParams)
+	params["message"] = nodes
+	_, err := a.bot.send(action, params, echo("forward_comic", groupID), 120*time.Second)
+	return err == nil
+}
+
 func (a *App) sendMessage(messageType string, groupID, userID int64, message string) {
 	if messageType == "group" && groupID > 0 {
 		_ = a.bot.SendGroupMessage(groupID, message)
@@ -2716,59 +2821,53 @@ func (a *App) flushBulkBatch(st *bulkBatchState) {
 		return st.Results[i].BatchIndex < st.Results[j].BatchIndex
 	})
 
-	lines := make([]string, 0, len(st.Results)*5+2)
-	files := make([]string, 0, len(st.Results))
-	cleanup := make([]string, 0, len(st.Results)*2)
+	cfg := a.currentConfig()
 	okCount := 0
+	failMessages := make([]string, 0)
+
 	for _, r := range st.Results {
-		if r.FilePath != "" {
-			okCount++
-			files = append(files, r.FilePath)
-		}
-		cleanup = append(cleanup, r.Cleanup...)
-		if strings.TrimSpace(r.FailMsg) != "" {
-			lines = append(lines, fmt.Sprintf("JM%s：%s", r.Number, r.FailMsg))
+		if r.FilePath == "" {
+			if strings.TrimSpace(r.FailMsg) != "" {
+				failMessages = append(failMessages, fmt.Sprintf("JM%s：%s", r.Number, r.FailMsg))
+			}
 			continue
 		}
-		if strings.TrimSpace(r.Message) != "" {
-			lines = append(lines, r.Message)
+		okCount++
+
+		// 使用转发消息发送（包含基本信息、封面、文件）
+		sendOK := a.sendComicForwardMessage(st.MessageType, st.GroupID, st.UserID, r.Message, r.CoverPath, r.FilePath, cfg)
+		if !sendOK {
+			failMessages = append(failMessages, fmt.Sprintf("JM%s：文件发送失败", r.Number))
+			a.notifyAdminSendFailure(st.GroupID, r.Number, "", r.FilePath)
 		}
 	}
 
-	summary := fmt.Sprintf("批量发送结果：成功 %d/%d", okCount, len(st.Results))
-	if len(lines) > 0 {
-		summary += "\n\n" + strings.Join(lines, "\n\n")
-	}
-
-	cfg := a.currentConfig()
-	sent := false
-	if cfg.ReplyAsCard {
-		if st.MessageType == "group" && st.GroupID > 0 {
-			sent = a.bot.SendGroupForwardBundle(cfg, st.GroupID, summary, files, cfg.CardUserID, cfg.CardNickname)
-		} else if st.MessageType == "private" && st.UserID > 0 {
-			sent = a.bot.SendPrivateForwardBundle(cfg, st.UserID, summary, files, cfg.CardUserID, cfg.CardNickname)
-		}
-	}
-	if !sent {
+	// 发送批量结果摘要
+	if len(failMessages) > 0 {
+		summary := fmt.Sprintf("批量发送结果：成功 %d/%d\n\n%s", okCount, len(st.Results), strings.Join(failMessages, "\n"))
 		a.sendMessage(st.MessageType, st.GroupID, st.UserID, summary)
-		for _, f := range files {
-			if st.MessageType == "group" && st.GroupID > 0 {
-				_ = a.bot.SendGroupFile(cfg, st.GroupID, f)
-			} else if st.MessageType == "private" && st.UserID > 0 {
-				_ = a.bot.SendPrivateFile(cfg, st.UserID, f)
-			}
-		}
 	}
 
+	// 清理临时文件
+	cleanup := make([]string, 0, len(st.Results)*2)
+	for _, r := range st.Results {
+		cleanup = append(cleanup, r.Cleanup...)
+	}
 	for _, c := range cleanup {
 		_ = os.Remove(c)
 	}
+
 	// 批量发送完成后删除原始PDF和manga目录以节省空间
 	for _, r := range st.Results {
 		if r.FilePath != "" && r.OrigPDF != "" {
 			if strings.EqualFold(filepath.Ext(r.OrigPDF), ".pdf") && fileExists(r.OrigPDF) {
 				_ = os.Remove(r.OrigPDF)
 				log.Printf("deleted original PDF after bulk send: %s", r.OrigPDF)
+			}
+			// 删除非cbz的发送文件
+			if !strings.EqualFold(filepath.Ext(r.FilePath), ".cbz") && fileExists(r.FilePath) {
+				_ = os.Remove(r.FilePath)
+				log.Printf("deleted non-cbz file after bulk send: %s", r.FilePath)
 			}
 			a.deleteMangaDirByID(normalizeJMID(r.Number))
 		}
