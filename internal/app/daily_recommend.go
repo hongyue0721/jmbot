@@ -88,10 +88,31 @@ type DailyAlbum struct {
 }
 
 func (a *App) sendDailyAlbumList(groupID int64, albums []DailyAlbum, cfg Config) {
-	// 先发送标题
-	a.sendMessage("group", groupID, 0, "【每日本子推荐】\n回复 序号 下载（可批量：1 2 3）")
+	senderID := cfg.CardUserID
+	nickname := cfg.CardNickname
+	if senderID <= 0 {
+		senderID = 10000
+	}
+	if nickname == "" {
+		nickname = "每日推荐"
+	}
 
-	// 每个本子单独发送一个转发消息（信息+封面）
+	nodes := make([]map[string]any, 0, len(albums)*2+1)
+
+	// 标题节点
+	titleMsg := "【每日本子推荐】\n回复 序号 下载（可批量：1 2 3）"
+	nodes = append(nodes, map[string]any{
+		"type": "node",
+		"data": map[string]any{
+			"user_id":  senderID,
+			"nickname": nickname,
+			"content": []map[string]any{
+				{"type": "text", "data": map[string]any{"text": titleMsg}},
+			},
+		},
+	})
+
+	// 每个本子：介绍 + 封面图
 	for i, album := range albums {
 		if i >= 5 {
 			break
@@ -105,7 +126,19 @@ func (a *App) sendDailyAlbumList(groupID int64, albums []DailyAlbum, cfg Config)
 		infoMsg := fmt.Sprintf("%d. [%s] %s\n作者：%s\n标签：%s\n章节数：%d", 
 			i+1, album.Source, album.Title, album.Author, tags, album.Episodes)
 
-		// 获取封面
+		// 介绍节点
+		nodes = append(nodes, map[string]any{
+			"type": "node",
+			"data": map[string]any{
+				"user_id":  senderID,
+				"nickname": fmt.Sprintf("%d. %s", i+1, album.Title),
+				"content": []map[string]any{
+					{"type": "text", "data": map[string]any{"text": infoMsg}},
+				},
+			},
+		})
+
+		// 封面节点（使用file类型而非image）
 		coverPath := ""
 		if album.Source == "Bika" && album.CoverURL != "" {
 			coverPath = a.downloadBikaCover(album.ID)
@@ -115,11 +148,41 @@ func (a *App) sendDailyAlbumList(groupID int64, albums []DailyAlbum, cfg Config)
 			}
 		}
 
-		// 发送转发消息（信息+封面）
-		a.sendComicForwardMessage("group", groupID, 0, infoMsg, coverPath, "", cfg)
+		if coverPath != "" && fileExists(coverPath) {
+			if pf, err := a.bot.prepareForwardFile(cfg, coverPath); err == nil && len(pf.candidates) > 0 {
+				nodes = append(nodes, map[string]any{
+					"type": "node",
+					"data": map[string]any{
+						"user_id":  senderID,
+						"nickname": fmt.Sprintf("%d. %s", i+1, album.Title),
+						"content": []map[string]any{
+							{"type": "file", "data": map[string]any{"file": pf.candidates[0]}},
+						},
+					},
+				})
+			}
+		}
+	}
 
-		// 清理临时封面
-		if coverPath != "" && strings.Contains(coverPath, "/tmp/") {
+	// 发送 - 每个群单独构建nodes避免共享引用问题
+	for _, gid := range []int64{groupID} {
+		nodesCopy := make([]map[string]any, len(nodes))
+		copy(nodesCopy, nodes)
+		
+		params := map[string]any{
+			"group_id": gid,
+			"message":  nodesCopy,
+		}
+		_, err := a.bot.send("send_group_forward_msg", params, echo("daily_recommend", gid), 300*time.Second)
+		if err != nil {
+			log.Printf("[Daily] 发送转发消息到群%d失败: %v", gid, err)
+		}
+	}
+
+	// 清理封面临时文件
+	for _, album := range albums {
+		if album.Source == "Bika" {
+			coverPath := filepath.Join(os.TempDir(), fmt.Sprintf("bika_cover_%s.jpg", album.ID))
 			_ = os.Remove(coverPath)
 		}
 	}
