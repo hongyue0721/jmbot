@@ -1447,6 +1447,14 @@ func (a *App) handleMessageEvent(data map[string]any) {
 		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("已删除每日推荐群：%d", groupIDToDel))
 		return
 	}
+	if matched(`^/jm\s+daily\s+now$`, rawMessage) {
+		if !a.requireAdmin(messageType, groupID, userID, "仅管理员可操作") {
+			return
+		}
+		a.sendMessage(messageType, groupID, userID, "正在发送每日推荐...")
+		go a.sendDailyRecommend()
+		return
+	}
 	if m := mustMatch(`^/jm\s+look\s+(\d+)$`, rawMessage); m != nil {
 		if !a.isJMAllowed(messageType, groupID, userID) {
 			return
@@ -4206,6 +4214,7 @@ func helpMessage() string {
 		"13) /jm cfg list|show|set：在线配置开关（管理员）\n" +
 		"14) /jm daily on|off：启用/关闭每日本子推荐（管理员）\n" +
 		"15) /jm daily add|del <群号>：添加/删除推荐群（管理员）\n" +
+		"16) /jm daily now：立即发送每日推荐（管理员）\n" +
 		"16) /jm help：查看帮助\n\n" +
 		"【哔咔漫画】\n" +
 		"1) /bika on|off：启用/关闭哔咔（管理员）\n" +
