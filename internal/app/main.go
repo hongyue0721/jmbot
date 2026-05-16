@@ -3290,6 +3290,10 @@ func sanitizeFileName(s string) string {
 	if s == "" {
 		return "JM"
 	}
+	// 限制文件名长度，避免创建目录/文件时失败
+	if len(s) > 200 {
+		s = s[:200]
+	}
 	return s
 }
 
