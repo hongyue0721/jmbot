@@ -1559,8 +1559,9 @@ func (a *App) handleMessageEvent(data map[string]any) {
 		return
 	}
 
-	// 处理确认命令（支持聚合搜索和哔咔搜索）
-	if m := mustMatch(`^确认\s+(.+)$`, rawMessage); m != nil {
+	// 处理确认命令（支持聚合搜索、哔咔搜索和每日推荐）
+	// 支持格式：确认 1 2 3、确认1、1、1 2 3
+	if m := mustMatch(`^(?:确认\s*)?(\d+(?:\s+\d+)*)$`, rawMessage); m != nil {
 		// 解析序号
 		parts := strings.Fields(m[1])
 		var indices []int
@@ -1572,6 +1573,57 @@ func (a *App) handleMessageEvent(data map[string]any) {
 			indices = append(indices, idx)
 		}
 		if len(indices) == 0 {
+			return
+		}
+
+		// 先检查每日推荐缓存
+		dailyKey := fmt.Sprintf("daily:%d", groupID)
+		a.searchMu.Lock()
+		dailyPending, dailyOk := a.search[dailyKey]
+		if dailyOk && time.Since(dailyPending.At) > 24*time.Hour {
+			delete(a.search, dailyKey)
+			dailyOk = false
+		}
+		a.searchMu.Unlock()
+
+		if dailyOk && len(dailyPending.AggResults) > 0 {
+			// 处理每日推荐结果
+			var validItems []SearchResultItem
+			for _, idx := range indices {
+				if idx > len(dailyPending.AggResults) {
+					a.sendMessage(messageType, groupID, userID, fmt.Sprintf("序号 %d 超出范围，最大为 %d", idx, len(dailyPending.AggResults)))
+					continue
+				}
+				validItems = append(validItems, dailyPending.AggResults[idx-1])
+			}
+
+			if len(validItems) == 0 {
+				return
+			}
+
+			// 逐个下载
+			if len(validItems) == 1 {
+				item := validItems[0]
+				a.sendMessage(messageType, groupID, userID, fmt.Sprintf("开始下载：%s [%s]", item.Title, item.Source))
+				if item.Source == "Bika" {
+					go a.bikaDownloadAndSend(item.ID, "", messageType, groupID, userID)
+				} else {
+					a.enqueueDownloads([]string{item.ID}, messageType, groupID, userID, data)
+				}
+			} else {
+				names := make([]string, len(validItems))
+				for i, item := range validItems {
+					names[i] = fmt.Sprintf("%s [%s]", item.Title, item.Source)
+				}
+				a.sendMessage(messageType, groupID, userID, fmt.Sprintf("开始下载 %d 个本子：\n%s", len(validItems), strings.Join(names, "\n")))
+				for _, item := range validItems {
+					if item.Source == "Bika" {
+						go a.bikaDownloadAndSend(item.ID, "", messageType, groupID, userID)
+					} else {
+						a.enqueueDownloads([]string{item.ID}, messageType, groupID, userID, data)
+					}
+				}
+			}
 			return
 		}
 
