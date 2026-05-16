@@ -97,43 +97,48 @@ func (a *App) sendDailyAlbumList(groupID int64, albums []DailyAlbum, cfg Config)
 		nickname = "每日推荐"
 	}
 
-	// 构建列表信息
-	var lines []string
-	for i, album := range albums {
-		if i >= 15 {
-			break
-		}
-		tags := album.Tags
-		if len(tags) > 30 {
-			tags = tags[:30] + "..."
-		}
-		lines = append(lines, fmt.Sprintf("%d. [%s] %s\n   作者：%s 标签：%s", 
-			i+1, album.Source, album.Title, album.Author, tags))
-	}
+	nodes := make([]map[string]any, 0, len(albums)*2+1)
 
-	infoMsg := fmt.Sprintf("【每日本子推荐】\n\n%s\n\n回复 序号 下载（可批量：1 2 3）", strings.Join(lines, "\n"))
-
-	nodes := make([]map[string]any, 0, len(albums)+1)
-
-	// 信息节点
+	// 标题节点
+	titleMsg := "【每日本子推荐】\n回复 序号 下载（可批量：1 2 3）"
 	nodes = append(nodes, map[string]any{
 		"type": "node",
 		"data": map[string]any{
 			"user_id":  senderID,
 			"nickname": nickname,
 			"content": []map[string]any{
-				{"type": "text", "data": map[string]any{"text": infoMsg}},
+				{"type": "text", "data": map[string]any{"text": titleMsg}},
 			},
 		},
 	})
 
-	// 每个本子的封面节点
+	// 每个本子：介绍 + 封面图
 	for i, album := range albums {
 		if i >= 15 {
 			break
 		}
 
-		// 获取封面
+		tags := album.Tags
+		if len(tags) > 40 {
+			tags = tags[:40] + "..."
+		}
+
+		infoMsg := fmt.Sprintf("%d. [%s] %s\n作者：%s\n标签：%s\n章节数：%d", 
+			i+1, album.Source, album.Title, album.Author, tags, album.Episodes)
+
+		// 介绍节点
+		nodes = append(nodes, map[string]any{
+			"type": "node",
+			"data": map[string]any{
+				"user_id":  senderID,
+				"nickname": fmt.Sprintf("%d. %s", i+1, album.Title),
+				"content": []map[string]any{
+					{"type": "text", "data": map[string]any{"text": infoMsg}},
+				},
+			},
+		})
+
+		// 封面节点
 		coverPath := ""
 		if album.Source == "Bika" && album.CoverURL != "" {
 			coverPath = a.downloadBikaCover(album.ID)
