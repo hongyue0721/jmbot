@@ -2745,7 +2745,7 @@ func (a *App) sendComicForwardMessage(messageType string, groupID, userID int64,
 
 	params := copyMap(baseParams)
 	params["message"] = nodes
-	_, err := a.bot.send(action, params, echo("forward_comic", groupID), 120*time.Second)
+	_, err := a.bot.send(action, params, echo("forward_comic", groupID), 600*time.Second)
 	return err == nil
 }
 
@@ -4528,7 +4528,7 @@ func (c *NapcatClient) sendForwardBundle(cfg Config, action string, baseParams m
 
 		params := copyMap(baseParams)
 		params["message"] = nodes
-		if _, err := c.send(action, params, echoValue, 120*time.Second); err == nil {
+		if _, err := c.send(action, params, echoValue, 600*time.Second); err == nil {
 			return true
 		}
 	}
@@ -4536,7 +4536,7 @@ func (c *NapcatClient) sendForwardBundle(cfg Config, action string, baseParams m
 }
 
 func (c *NapcatClient) prepareForwardFile(cfg Config, filePath string) (preparedForwardFile, error) {
-	if streamPath, err := c.uploadFileStream(filePath, 120*time.Second); err == nil && strings.TrimSpace(streamPath) != "" {
+	if streamPath, err := c.uploadFileStream(filePath, 600*time.Second); err == nil && strings.TrimSpace(streamPath) != "" {
 		return preparedForwardFile{
 			candidates: []string{
 				streamPath,
@@ -4696,7 +4696,7 @@ func (c *NapcatClient) sendFile(cfg Config, action string, baseParams map[string
 		return true
 	}
 
-	if streamPath, err := c.uploadFileStream(filePath, 120*time.Second); err == nil && strings.TrimSpace(streamPath) != "" {
+	if streamPath, err := c.uploadFileStream(filePath, 600*time.Second); err == nil && strings.TrimSpace(streamPath) != "" {
 		streamRefs := []string{
 			streamPath,
 			"file://" + streamPath,
@@ -4742,7 +4742,7 @@ func (c *NapcatClient) tryPrimarySendRefs(action string, baseParams map[string]a
 	for _, ref := range fileRefs {
 		params := copyMap(baseParams)
 		params["message"] = []map[string]any{{"type": "file", "data": map[string]any{"file": ref}}}
-		_, err := c.send(action, params, echo("file", time.Now().UnixNano()), 120*time.Second)
+		_, err := c.send(action, params, echo("file", time.Now().UnixNano()), 600*time.Second)
 		if err == nil {
 			log.Printf("send file primary action success ref=%s", ref)
 			return true, nil
@@ -4790,7 +4790,7 @@ func (c *NapcatClient) tryUploadFileFallback(sendAction string, baseParams map[s
 	for _, fileArg := range fileRefs {
 		req := copyMap(params)
 		req["file"] = fileArg
-		_, err := c.send(action, req, echo("file_upload_fallback", time.Now().UnixNano()), 120*time.Second)
+		_, err := c.send(action, req, echo("file_upload_fallback", time.Now().UnixNano()), 600*time.Second)
 		if err == nil {
 			log.Printf("file upload fallback success action=%s file=%s", action, fileArg)
 			return true
