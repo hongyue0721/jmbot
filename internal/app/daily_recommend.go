@@ -47,22 +47,28 @@ func (a *App) sendDailyRecommend() {
 
 	log.Printf("[Daily] 开始获取每日推荐")
 
-	// 优先获取哔咔周榜
+	// 优先获取哔咔日榜
 	var albums []DailyAlbum
 	bikaAlbums := a.getBikaDailyAlbums()
-	if len(bikaAlbums) > 0 {
-		log.Printf("[Daily] 哔咔日榜获取: %d 本", len(bikaAlbums))
-		albums = bikaAlbums
-	} else {
-		// 哔咔不可用，使用JM周榜
+	log.Printf("[Daily] 哔咔日榜获取: %d 本", len(bikaAlbums))
+
+	// 哔咔不可用或数量不足时，补充JM周榜
+	if len(bikaAlbums) < 15 {
 		jmAlbums := a.getJMDailyAlbums()
 		log.Printf("[Daily] JM周榜获取: %d 本", len(jmAlbums))
-		albums = jmAlbums
+		albums = append(bikaAlbums, jmAlbums...)
+	} else {
+		albums = bikaAlbums
 	}
 
 	if len(albums) == 0 {
 		log.Printf("[Daily] 没有可用的本子")
 		return
+	}
+
+	// 限制数量
+	if len(albums) > 15 {
+		albums = albums[:15]
 	}
 
 	// 发送到开启的群
