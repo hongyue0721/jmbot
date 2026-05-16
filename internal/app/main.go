@@ -3290,9 +3290,13 @@ func sanitizeFileName(s string) string {
 	if s == "" {
 		return "JM"
 	}
-	runes := []rune(s)
-	if len(runes) > 200 {
-		s = string(runes[:200])
+	// 按字节截断，避免ext4文件系统255字节限制
+	for len(s) > 200 {
+		runes := []rune(s)
+		if len(runes) <= 1 {
+			break
+		}
+		s = string(runes[:len(runes)-1])
 	}
 	return s
 }
