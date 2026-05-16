@@ -66,9 +66,9 @@ func (a *App) sendDailyRecommend() {
 		return
 	}
 
-	// 限制数量
-	if len(albums) > 15 {
-		albums = albums[:15]
+	// 限制数量为5个，避免节点过多导致发送超时
+	if len(albums) > 5 {
+		albums = albums[:5]
 	}
 
 	// 发送到开启的群
