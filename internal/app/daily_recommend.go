@@ -174,7 +174,7 @@ func (a *App) sendDailyAlbumList(groupID int64, albums []DailyAlbum, cfg Config)
 		"group_id": groupID,
 		"message":  nodes,
 	}
-	a.bot.send("send_group_forward_msg", params, echo("daily_recommend", groupID), 60*time.Second)
+	a.bot.send("send_group_forward_msg", params, echo("daily_recommend", groupID), 300*time.Second)
 
 	// 缓存供回复下载
 	dailyCacheKey := fmt.Sprintf("daily:%d", groupID)
