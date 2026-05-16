@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,68 +41,47 @@ func (a *App) startDailyRecommend() {
 // sendDailyRecommend 发送每日推荐
 func (a *App) sendDailyRecommend() {
 	cfg := a.currentConfig()
-	if !cfg.DailyRecommendEnabled || len(cfg.DailyRecommendGroups) == 0 {
+	if len(cfg.DailyRecommendGroups) == 0 {
 		return
 	}
 
 	log.Printf("[Daily] 开始获取每日推荐")
 
-	// 获取JM周榜
-	jmAlbums := a.getJMTrendingAlbums()
-	log.Printf("[Daily] JM周榜获取: %d 本", len(jmAlbums))
+	// 优先获取哔咔周榜
+	var albums []DailyAlbum
+	bikaAlbums := a.getBikaDailyAlbums()
+	if len(bikaAlbums) > 0 {
+		log.Printf("[Daily] 哔咔日榜获取: %d 本", len(bikaAlbums))
+		albums = bikaAlbums
+	} else {
+		// 哔咔不可用，使用JM周榜
+		jmAlbums := a.getJMDailyAlbums()
+		log.Printf("[Daily] JM周榜获取: %d 本", len(jmAlbums))
+		albums = jmAlbums
+	}
 
-	// 获取哔咔日榜
-	bikaAlbums := a.getBikaTrendingAlbums()
-	log.Printf("[Daily] 哔咔日榜获取: %d 本", len(bikaAlbums))
-
-	// 合并并随机选择
-	allAlbums := append(jmAlbums, bikaAlbums...)
-	if len(allAlbums) == 0 {
+	if len(albums) == 0 {
 		log.Printf("[Daily] 没有可用的本子")
 		return
 	}
 
-	// 随机选择一个
-	selected := allAlbums[rand.Intn(len(allAlbums))]
-	log.Printf("[Daily] 选择推荐: %s - %s", selected.ID, selected.Title)
-
 	// 发送到开启的群
 	for _, groupID := range cfg.DailyRecommendGroups {
-		a.sendDailyRecommendToGroup(groupID, selected, cfg)
+		a.sendDailyAlbumList(groupID, albums, cfg)
 	}
 }
 
-func (a *App) sendDailyRecommendToGroup(groupID int64, album Album, cfg Config) {
-	// 构建信息
-	isBika := strings.HasPrefix(album.ID, "bika_")
-	source := "JM"
-	downloadID := album.ID
-	if isBika {
-		source = "Bika"
-		downloadID = strings.TrimPrefix(album.ID, "bika_")
-	}
+type DailyAlbum struct {
+	ID       string
+	Title    string
+	Author   string
+	Tags     string
+	Episodes int
+	Source   string // "Bika" 或 "JM"
+	CoverURL string // 哔咔封面URL
+}
 
-	tags := strings.Join(album.Tags, ", ")
-	if len(tags) > 100 {
-		tags = tags[:100] + "..."
-	}
-
-	infoMsg := fmt.Sprintf("【每日本子推荐】\n来源：%s\n标题：%s\n标签：%s\n章节数：%d\n\n回复本聊天记录+序号下载", 
-		source, album.Title, tags, album.Episodes)
-
-	// 获取封面
-	coverPath := ""
-	if isBika {
-		// 哔咔：获取封面图片URL并下载
-		coverPath = a.downloadBikaCover(downloadID)
-	} else {
-		// JM：获取本地manga第一页
-		if mangaPath, ok, _ := a.findMangaPageByID(album.ID, 1); ok && fileExists(mangaPath) {
-			coverPath = mangaPath
-		}
-	}
-
-	// 使用转发消息发送
+func (a *App) sendDailyAlbumList(groupID int64, albums []DailyAlbum, cfg Config) {
 	senderID := cfg.CardUserID
 	nickname := cfg.CardNickname
 	if senderID <= 0 {
@@ -113,7 +91,23 @@ func (a *App) sendDailyRecommendToGroup(groupID int64, album Album, cfg Config) 
 		nickname = "每日推荐"
 	}
 
-	nodes := make([]map[string]any, 0, 2)
+	// 构建列表信息
+	var lines []string
+	for i, album := range albums {
+		if i >= 15 {
+			break
+		}
+		tags := album.Tags
+		if len(tags) > 30 {
+			tags = tags[:30] + "..."
+		}
+		lines = append(lines, fmt.Sprintf("%d. [%s] %s\n   作者：%s 标签：%s", 
+			i+1, album.Source, album.Title, album.Author, tags))
+	}
+
+	infoMsg := fmt.Sprintf("【每日本子推荐】\n\n%s\n\n回复 序号 下载（可批量：1 2 3）", strings.Join(lines, "\n"))
+
+	nodes := make([]map[string]any, 0, len(albums)+1)
 
 	// 信息节点
 	nodes = append(nodes, map[string]any{
@@ -127,19 +121,40 @@ func (a *App) sendDailyRecommendToGroup(groupID int64, album Album, cfg Config) 
 		},
 	})
 
-	// 封面节点
-	if coverPath != "" && fileExists(coverPath) {
-		if pf, err := a.bot.prepareForwardFile(cfg, coverPath); err == nil && len(pf.candidates) > 0 {
-			nodes = append(nodes, map[string]any{
-				"type": "node",
-				"data": map[string]any{
-					"user_id":  senderID,
-					"nickname": nickname,
-					"content": []map[string]any{
-						{"type": "image", "data": map[string]any{"file": pf.candidates[0]}},
+	// 每个本子的封面节点
+	for i, album := range albums {
+		if i >= 15 {
+			break
+		}
+
+		// 获取封面
+		coverPath := ""
+		if album.Source == "Bika" && album.CoverURL != "" {
+			coverPath = a.downloadBikaCover(album.ID)
+		} else if album.Source == "JM" {
+			if mangaPath, ok, _ := a.findMangaPageByID(album.ID, 1); ok && fileExists(mangaPath) {
+				coverPath = mangaPath
+			}
+		}
+
+		if coverPath != "" && fileExists(coverPath) {
+			if pf, err := a.bot.prepareForwardFile(cfg, coverPath); err == nil && len(pf.candidates) > 0 {
+				nodes = append(nodes, map[string]any{
+					"type": "node",
+					"data": map[string]any{
+						"user_id":  senderID,
+						"nickname": fmt.Sprintf("%d. %s", i+1, album.Title),
+						"content": []map[string]any{
+							{"type": "image", "data": map[string]any{"file": pf.candidates[0]}},
+						},
 					},
-				},
-			})
+				})
+			}
+		}
+
+		// 清理临时封面
+		if coverPath != "" && strings.Contains(coverPath, "/tmp/") {
+			_ = os.Remove(coverPath)
 		}
 	}
 
@@ -150,32 +165,23 @@ func (a *App) sendDailyRecommendToGroup(groupID int64, album Album, cfg Config) 
 	}
 	a.bot.send("send_group_forward_msg", params, echo("daily_recommend", groupID), 60*time.Second)
 
-	// 清理封面临时文件
-	if coverPath != "" && strings.Contains(coverPath, "/tmp/") {
-		_ = os.Remove(coverPath)
+	// 缓存供回复下载
+	dailyCacheKey := fmt.Sprintf("daily:%d", groupID)
+	var searchResults []SearchResultItem
+	for _, album := range albums {
+		searchResults = append(searchResults, SearchResultItem{
+			Source: album.Source,
+			ID:     album.ID,
+			Title:  album.Title,
+			Tags:   strings.Split(album.Tags, ", "),
+		})
 	}
-
-	// 缓存推荐结果供回复下载
-	if isBika {
-		bikaSearchCacheMu.Lock()
-		bikaSearchCache[fmt.Sprintf("daily:%d", groupID)] = BikaPendingSearch{
-			Results: []BikaSearchResult{{
-				ID:    downloadID,
-				Title: album.Title,
-				Tags:  album.Tags,
-			}},
-			At: time.Now(),
-		}
-		bikaSearchCacheMu.Unlock()
-	} else {
-		a.searchMu.Lock()
-		a.search[fmt.Sprintf("daily:%d", groupID)] = PendingSearch{
-			AlbumID: downloadID,
-			Title:   album.Title,
-			At:      time.Now(),
-		}
-		a.searchMu.Unlock()
+	a.searchMu.Lock()
+	a.search[dailyCacheKey] = PendingSearch{
+		At:         time.Now(),
+		AggResults: searchResults,
 	}
+	a.searchMu.Unlock()
 }
 
 // downloadBikaCover 下载哔咔封面到临时文件
@@ -185,7 +191,6 @@ func (a *App) downloadBikaCover(comicID string) string {
 		return ""
 	}
 
-	// 获取章节图片第一页
 	pages, _, err := a.bika.GetChapterImages(comicID, 1, 1, token)
 	if err != nil || len(pages) == 0 {
 		return ""
@@ -193,102 +198,28 @@ func (a *App) downloadBikaCover(comicID string) string {
 
 	first := pages[0]
 	imageURL := buildBikaImageURL(first.Media.FileServer, first.Media.Path)
-	tmpPath := fmt.Sprintf("/tmp/bika_cover_%s%s", comicID, filepath.Ext(first.Media.OriginalName))
+	tmpPath := filepath.Join(os.TempDir(), fmt.Sprintf("bika_cover_%s%s", comicID, filepath.Ext(first.Media.OriginalName)))
 	if err := downloadBikaFile(imageURL, tmpPath, token, "original"); err != nil {
 		return ""
 	}
 	return tmpPath
 }
 
-// getJMTrendingAlbums 获取JM周榜
-func (a *App) getJMTrendingAlbums() []Album {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// 使用搜索热门关键词获取周榜
-	keywords := []string{"本周", "热门", "推荐"}
-	var albums []Album
-
-	for _, keyword := range keywords {
-		data, err := a.jm.reqAPI(ctx, "/search", map[string]string{
-			"main_tag":     "0",
-			"search_query": keyword,
-			"page":         "1",
-			"o":            "mv", // 按浏览量排序
-			"t":            "a",
-		})
-		if err != nil {
-			continue
-		}
-
-		content, ok := data["content"].([]any)
-		if !ok {
-			continue
-		}
-
-		for _, item := range content {
-			row, ok := item.(map[string]any)
-			if !ok {
-				continue
-			}
-			id := toJMID(anyToString(row["id"]))
-			title := anyToString(row["name"])
-			tags := parseTags(row["tags"])
-			episodes := toInt64(row["episodes"])
-			if id != "" && title != "" {
-				albums = append(albums, Album{
-					ID:       id,
-					Title:    title,
-					Tags:     tags,
-					Episodes: int(episodes),
-				})
-			}
-		}
-		if len(albums) >= 5 {
-			break
-		}
-	}
-
-	return albums
-}
-
-// parseTags 解析标签
-func parseTags(v any) []string {
-	switch t := v.(type) {
-	case []any:
-		var tags []string
-		for _, item := range t {
-			if s, ok := item.(string); ok {
-				tags = append(tags, s)
-			}
-		}
-		return tags
-	case []string:
-		return t
-	case string:
-		if t != "" {
-			return strings.Split(t, ",")
-		}
-	}
-	return nil
-}
-
-// getBikaTrendingAlbums 获取哔咔日榜
-func (a *App) getBikaTrendingAlbums() []Album {
+// getBikaDailyAlbums 获取哔咔日榜
+func (a *App) getBikaDailyAlbums() []DailyAlbum {
 	if a.bika == nil {
 		return nil
 	}
 
-	token := a.getBikaUserToken(0) // 使用全局token
+	token := a.getBikaUserToken(0)
 	if token == "" {
 		return nil
 	}
 
-	// 获取哔咔排行榜
-	endpoint := "comics/leaderboard?tt=1&ct=VC" // tt=1 为日榜
+	endpoint := "comics/leaderboard?tt=1&ct=VC" // tt=1 日榜
 	respBody, err := a.bika.makeRequest("GET", endpoint, nil, token)
 	if err != nil {
-		log.Printf("[Daily] 哔咔排行榜获取失败: %v", err)
+		log.Printf("[Daily] 哔咔周榜获取失败: %v", err)
 		return nil
 	}
 
@@ -310,18 +241,90 @@ func (a *App) getBikaTrendingAlbums() []Album {
 	}
 
 	if err := json.Unmarshal(respBody, &resp); err != nil {
-		log.Printf("[Daily] 哔咔排行榜解析失败: %v", err)
+		log.Printf("[Daily] 哔咔周榜解析失败: %v", err)
 		return nil
 	}
 
-	var albums []Album
+	var albums []DailyAlbum
 	for _, comic := range resp.Data.Comics.Docs {
-		albums = append(albums, Album{
-			ID:       "bika_" + comic.ID,
+		tags := strings.Join(append(comic.Tags, comic.Categories...), ", ")
+		albums = append(albums, DailyAlbum{
+			ID:       comic.ID,
 			Title:    comic.Title,
-			Tags:     append(comic.Tags, comic.Categories...),
+			Author:   comic.Author,
+			Tags:     tags,
 			Episodes: comic.EPSCount,
+			Source:   "Bika",
+			CoverURL: "yes",
 		})
+	}
+
+	return albums
+}
+
+// getJMDailyAlbums 获取JM周榜
+func (a *App) getJMDailyAlbums() []DailyAlbum {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var albums []DailyAlbum
+	keywords := []string{"本周热门", "热门推荐"}
+
+	for _, keyword := range keywords {
+		data, err := a.jm.reqAPI(ctx, "/search", map[string]string{
+			"main_tag":     "0",
+			"search_query": keyword,
+			"page":         "1",
+			"o":            "mv",
+			"t":            "a",
+		})
+		if err != nil {
+			continue
+		}
+
+		content, ok := data["content"].([]any)
+		if !ok {
+			continue
+		}
+
+		for _, item := range content {
+			row, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			id := toJMID(anyToString(row["id"]))
+			title := anyToString(row["name"])
+			if id == "" || title == "" {
+				continue
+			}
+
+			tags := ""
+			if t := row["tags"]; t != nil {
+				if tagList, ok := t.([]any); ok {
+					var tagStrs []string
+					for _, tag := range tagList {
+						if s, ok := tag.(string); ok {
+							tagStrs = append(tagStrs, s)
+						}
+					}
+					tags = strings.Join(tagStrs, ", ")
+				}
+			}
+
+			albums = append(albums, DailyAlbum{
+				ID:    id,
+				Title: title,
+				Tags:  tags,
+				Source: "JM",
+			})
+		}
+		if len(albums) >= 15 {
+			break
+		}
+	}
+
+	if len(albums) > 15 {
+		albums = albums[:15]
 	}
 
 	return albums
