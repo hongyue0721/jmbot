@@ -222,37 +222,35 @@ func (a *App) getBikaDailyAlbums() []DailyAlbum {
 		return nil
 	}
 
-	endpoint := "comics/leaderboard?tt=1&ct=VC" // tt=1 日榜
+	endpoint := "comics/leaderboard?tt=H24&ct=VC" // tt=H24 日榜
 	respBody, err := a.bika.makeRequest("GET", endpoint, nil, token)
 	if err != nil {
-		log.Printf("[Daily] 哔咔周榜获取失败: %v", err)
+		log.Printf("[Daily] 哔咔日榜获取失败: %v", err)
 		return nil
 	}
 
 	var resp struct {
 		Code int `json:"code"`
 		Data struct {
-			Comics struct {
-				Docs []struct {
-					ID          string   `json:"_id"`
-					Title       string   `json:"title"`
-					Author      string   `json:"author"`
-					Tags        []string `json:"tags"`
-					Categories  []string `json:"categories"`
-					EPSCount    int      `json:"epsCount"`
-					Description string   `json:"description"`
-				} `json:"docs"`
+			Comics []struct {
+				ID          string   `json:"_id"`
+				Title       string   `json:"title"`
+				Author      string   `json:"author"`
+				Tags        []string `json:"tags"`
+				Categories  []string `json:"categories"`
+				EPSCount    int      `json:"epsCount"`
+				Description string   `json:"description"`
 			} `json:"comics"`
 		} `json:"data"`
 	}
 
 	if err := json.Unmarshal(respBody, &resp); err != nil {
-		log.Printf("[Daily] 哔咔周榜解析失败: %v", err)
+		log.Printf("[Daily] 哔咔日榜解析失败: %v", err)
 		return nil
 	}
 
 	var albums []DailyAlbum
-	for _, comic := range resp.Data.Comics.Docs {
+	for _, comic := range resp.Data.Comics {
 		tags := strings.Join(append(comic.Tags, comic.Categories...), ", ")
 		albums = append(albums, DailyAlbum{
 			ID:       comic.ID,
