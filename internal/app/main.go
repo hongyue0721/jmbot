@@ -2753,7 +2753,7 @@ func (a *App) sendComicForwardMessage(messageType string, groupID, userID int64,
 					"user_id":  senderID,
 					"nickname": nickname,
 					"content": []map[string]any{
-						{"type": "image", "data": map[string]any{"file": pf.candidates[0]}},
+						{"type": "file", "data": map[string]any{"file": pf.candidates[0]}},
 					},
 				},
 			})
@@ -2792,7 +2792,7 @@ func (a *App) sendComicForwardMessage(messageType string, groupID, userID int64,
 		return false
 	}
 
-	// 发送转发消息
+	// 发送转发消息，重试3次
 	var action string
 	var baseParams map[string]any
 	if messageType == "group" {
@@ -2803,10 +2803,17 @@ func (a *App) sendComicForwardMessage(messageType string, groupID, userID int64,
 		baseParams = map[string]any{"user_id": userID}
 	}
 
-	params := copyMap(baseParams)
-	params["message"] = nodes
-	_, err := a.bot.send(action, params, echo("forward_comic", groupID), 600*time.Second)
-	return err == nil
+	for retry := 0; retry < 3; retry++ {
+		params := copyMap(baseParams)
+		params["message"] = nodes
+		_, err := a.bot.send(action, params, echo("forward_comic", groupID), 600*time.Second)
+		if err == nil {
+			return true
+		}
+		log.Printf("[Forward] 发送失败 (重试%d/3): %v", retry+1, err)
+		time.Sleep(3 * time.Second)
+	}
+	return false
 }
 
 func (a *App) sendMessage(messageType string, groupID, userID int64, message string) {
