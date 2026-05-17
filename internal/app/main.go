@@ -2606,19 +2606,23 @@ func (a *App) processTask(task DownloadTask) {
 		for _, c := range cleanup {
 			_ = os.Remove(c)
 		}
-		// 发送成功后删除非cbz文件和manga目录以节省空间
+		// 发送成功后延迟删除文件（保留一天）
 		if ok {
-			// 删除原始PDF文件
-			if strings.EqualFold(filepath.Ext(path), ".pdf") && fileExists(path) {
-				_ = os.Remove(path)
-				log.Printf("deleted original PDF after send: %s", path)
-			}
-			// 删除非cbz的发送文件（如果发送的是zip/pdf等）
-			if !strings.EqualFold(filepath.Ext(sendPath), ".cbz") && fileExists(sendPath) {
-				_ = os.Remove(sendPath)
-				log.Printf("deleted non-cbz file after send: %s", sendPath)
-			}
-			a.deleteMangaDirByID(normalizeJMID(task.Number))
+			go func(origPath, sendPath string, number string) {
+				// 延迟24小时删除
+				time.Sleep(24 * time.Hour)
+				// 删除原始PDF文件
+				if strings.EqualFold(filepath.Ext(origPath), ".pdf") && fileExists(origPath) {
+					_ = os.Remove(origPath)
+					log.Printf("deleted original PDF after delay: %s", origPath)
+				}
+				// 删除非cbz的发送文件
+				if !strings.EqualFold(filepath.Ext(sendPath), ".cbz") && fileExists(sendPath) {
+					_ = os.Remove(sendPath)
+					log.Printf("deleted non-cbz file after delay: %s", sendPath)
+				}
+				a.deleteMangaDirByID(normalizeJMID(number))
+			}(path, sendPath, task.Number)
 		}
 	}
 	_ = name
@@ -2924,19 +2928,21 @@ func (a *App) flushBulkBatch(st *bulkBatchState) {
 		_ = os.Remove(c)
 	}
 
-	// 批量发送完成后删除原始PDF和manga目录以节省空间
+	// 批量发送完成后延迟删除文件（保留一天）
 	for _, r := range st.Results {
 		if r.FilePath != "" && r.OrigPDF != "" {
-			if strings.EqualFold(filepath.Ext(r.OrigPDF), ".pdf") && fileExists(r.OrigPDF) {
-				_ = os.Remove(r.OrigPDF)
-				log.Printf("deleted original PDF after bulk send: %s", r.OrigPDF)
-			}
-			// 删除非cbz的发送文件
-			if !strings.EqualFold(filepath.Ext(r.FilePath), ".cbz") && fileExists(r.FilePath) {
-				_ = os.Remove(r.FilePath)
-				log.Printf("deleted non-cbz file after bulk send: %s", r.FilePath)
-			}
-			a.deleteMangaDirByID(normalizeJMID(r.Number))
+			go func(origPath, filePath, number string) {
+				time.Sleep(24 * time.Hour)
+				if strings.EqualFold(filepath.Ext(origPath), ".pdf") && fileExists(origPath) {
+					_ = os.Remove(origPath)
+					log.Printf("deleted original PDF after delay: %s", origPath)
+				}
+				if !strings.EqualFold(filepath.Ext(filePath), ".cbz") && fileExists(filePath) {
+					_ = os.Remove(filePath)
+					log.Printf("deleted non-cbz file after delay: %s", filePath)
+				}
+				a.deleteMangaDirByID(normalizeJMID(number))
+			}(r.OrigPDF, r.FilePath, r.Number)
 		}
 	}
 }
