@@ -164,7 +164,7 @@ func (a *App) sendDailyAlbumList(groupID int64, albums []DailyAlbum, cfg Config)
 		}
 	}
 
-	// 发送 - 每个群单独构建nodes避免共享引用问题
+	// 发送 - 每个群单独构建nodes避免共享引用问题，失败重试3次
 	for _, gid := range []int64{groupID} {
 		nodesCopy := make([]map[string]any, len(nodes))
 		copy(nodesCopy, nodes)
@@ -173,9 +173,19 @@ func (a *App) sendDailyAlbumList(groupID int64, albums []DailyAlbum, cfg Config)
 			"group_id": gid,
 			"message":  nodesCopy,
 		}
-		_, err := a.bot.send("send_group_forward_msg", params, echo("daily_recommend", gid), 300*time.Second)
-		if err != nil {
-			log.Printf("[Daily] 发送转发消息到群%d失败: %v", gid, err)
+		
+		sent := false
+		for retry := 0; retry < 3; retry++ {
+			_, err := a.bot.send("send_group_forward_msg", params, echo("daily_recommend", gid), 300*time.Second)
+			if err == nil {
+				sent = true
+				break
+			}
+			log.Printf("[Daily] 发送转发消息到群%d失败 (重试%d/3): %v", gid, retry+1, err)
+			time.Sleep(3 * time.Second)
+		}
+		if !sent {
+			log.Printf("[Daily] 发送转发消息到群%d最终失败", gid)
 		}
 	}
 
