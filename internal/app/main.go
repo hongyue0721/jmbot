@@ -692,7 +692,7 @@ func fillDefaults(cfg *Config) {
 		cfg.AIImageTimeout = 300
 	}
 	if cfg.AIImageMaxRetries <= 0 {
-		cfg.AIImageMaxRetries = 3
+		cfg.AIImageMaxRetries = 2
 	}
 	if cfg.AIImageWaitingImage == "" {
 		cfg.AIImageWaitingImage = defaultWaitingImage

@@ -119,6 +119,6 @@ ai_image_base_url: "https://api.openai.com/v1"  # OpenAI 兼容 API 地址
 ai_image_api_key: ""                 # API Key（也可通过环境变量 AI_IMAGE_API_KEY 设置）
 ai_image_model: "dall-e-3"           # 模型名
 ai_image_size: "1024x1024"           # 图片尺寸
-ai_image_timeout_seconds: 300        # 请求超时（秒）
-ai_image_max_retries: 3              # 失败重试次数
+ai_image_timeout_seconds: 300        # 请求超时（秒），默认 5 分钟
+ai_image_max_retries: 2              # 失败重试次数
 ai_image_waiting_image: ""           # 等待时发送的图片 URL 或 base64://（空则不发送）
