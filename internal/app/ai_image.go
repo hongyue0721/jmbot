@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -10,8 +11,9 @@ import (
 	"napcat-jm-go/internal/aiimage"
 )
 
+const defaultWaitingImage = "base64://iVBORw0KGgoAAAANSUhEUgAAAHgAAAB4CAYAAAA5ZDbSAAADzUlEQVR4nO2bQW7UQBBF7VFmx5qTwAUabsCGu7DOXdhwA8gF4CSssxukIEsYWZY909Pd1fXLeU+KFCmJ5cyb/7td9gwDAAAAAAAAAAAAAAAAAAAAAAAAAGQxDoH5/eH9y/z92x8/m/4vl+8P/499/vgn7Os0RhdrIXctOLLoMbLYnnKjih6jirWSu1XPe8IjiD4N4vSWu2aSuyfyVtIVGKOJ7SH3shI3C74mVDXNYySxHnLX8qKtz2MUsb1q+ZKx3uZUs4po+TW495qbg4q8MIK9a7lmXc79fS9cXziVWq5ZX9XrWiLBysmNXtdugiPU8prSgYdnXY+vvZZb1q1iXctVtLLciMOO0xFrOaclrFCra5kEt5A7iZ2+So51bpg+pSSP0WfLFjf9L43WUoU6fxicKZVi+TTHOePmQu5xvAceY6RbfpZSLZ/w8LyfPEaQ2+MRHYtx5bW/LTlGGME5grxv9PeSbC34pCZ33gkPB+RcOMsOs8nak6s83Wq9Aeu98TJ70XLWzdykqshdM4sqqdmaqpdL8FLQvfWrKrc2jb2SbLIGb13OHHltvVRIrj2Ge4KPKrUV1kmWmUVHq+eWa6flpZLrJOsIgms3W9a4nFCky6IWn4DwxP2EVCdWR0qxFJE3ZReRR2UBAAAAAAAAAAAAAF41775+CjuwT4/Pcuc+qgr+9fmb3LmVyH368sb1/5B7ZCea2Bzx89fggOSLGS3FqVBej3SfFNfRKGJbptsq4WYVHXmzdCRM1+BayRHeJKminsNW9LJiSyUdtaafFmKXbw4r2V120TVJVE5xykzvLHUpsdeu2jQlazklqVTdUacMQXupXP+tZVV3/XzwJKtUlIrodEPsLVm9r4dNK3pLhnLl1pCzadqSa73Rcplk3SN5/SbxfIOkjWrN3Q17TbLMBe9VarSNV1rteO9Jnuccust6dk1I7pq6dwzrNTn9k1Mq41pyDyO4heSc1LaSnRpdn3rLnei6I+0hOfdYFmndOpb3LUSZ24Ut19WSY6XH55dW40OlG/9dBd9KlucO+alRqmqvkw+b4JYbMq9hSBJKrpvg6cVXTrJlcj0e33FLcKlk71FlhFqWruhoSU6CtbxkjCDynnFlz4Qn4eRKJfjeulao6RRArozgaHWdxGt5icS7rLSut36312xaPbkzUidz7zrbu7qTyPjxEBV9TZb37cIocidkTyz3mnj5M6sEJ9HPHeUgf4I1l1Mt8HjMpiVhTnRJr81V6vj0oxXhTniJZT2nDg+lAwAAAAAAAAAAAAAAAAAAAAAAAMCgw19G18MTjD40swAAAABJRU5ErkJggg=="
+
 func (a *App) handleAIImageCommand(rawMessage string, data map[string]any, messageType string, groupID, userID int64) bool {
-	// image on / off / help
 	if m := mustMatch(`^(?:/)?image\s+(on|off|help)$`, rawMessage); m != nil {
 		switch m[1] {
 		case "on":
@@ -68,16 +70,37 @@ func (a *App) handleAIImageCommand(rawMessage string, data map[string]any, messa
 		MaxRetries: cfg.AIImageMaxRetries,
 	}
 
-	a.sendMessage(messageType, groupID, userID, "正在生成图片...")
+	useImageToImage := false
+	imageBytes, extractErr := a.extractAIImageBytes(data)
+	if extractErr != nil {
+		log.Printf("[AI Image] extract image failed: %v", extractErr)
+	}
+	if len(imageBytes) > 0 {
+		useImageToImage = true
+	}
 
-	imageBytes, _ := a.extractAIImageBytes(data)
+	waitingImageSent := false
+	if messageType == "group" && groupID > 0 {
+		if cfg.AIImageWaitingImage != "" {
+			waitingImageSent = a.bot.SendGroupImage(groupID, cfg.AIImageWaitingImage)
+		}
+	}
 
 	var result *aiimage.Result
 	var err error
 
-	if len(imageBytes) > 0 {
+	if useImageToImage {
 		result, err = aiimage.EditImage(aiCfg, prompt, imageBytes)
+		if strings.Contains(err.Error(), "不支持图生图") {
+			if !waitingImageSent && messageType == "group" && groupID > 0 {
+				a.bot.SendGroupMsgWithAtText(groupID, userID, "当前模型不支持图生图，正在尝试文生图...")
+			}
+			result, err = aiimage.GenerateImage(aiCfg, prompt)
+		}
 	} else {
+		if !waitingImageSent && !(messageType == "group" && groupID > 0) {
+			a.sendMessage(messageType, groupID, userID, "正在生成图片...")
+		}
 		result, err = aiimage.GenerateImage(aiCfg, prompt)
 	}
 
@@ -135,6 +158,13 @@ func (a *App) extractAIImageBytes(data map[string]any) ([]byte, error) {
 					return src.ImageBytes, nil
 				}
 			}
+			refs := extractSoutuImageFileRefsFromEvent(msgData)
+			for _, ref := range refs {
+				u, getErr := a.bot.GetImageURL(ref)
+				if getErr == nil && u != "" {
+					return downloadImageBytes(u)
+				}
+			}
 		}
 	}
 
@@ -189,5 +219,5 @@ func downloadImageBytes(imageURL string) ([]byte, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("download image status %d", resp.StatusCode)
 	}
-	return 	io.ReadAll(resp.Body)
+	return io.ReadAll(resp.Body)
 }
