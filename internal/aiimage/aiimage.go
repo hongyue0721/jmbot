@@ -47,7 +47,7 @@ func generateImageOnce(cfg Config, prompt string) (*Result, error) {
 		"prompt":          prompt,
 		"n":               1,
 		"size":            cfg.Size,
-		"response_format": "url",
+		"response_format": "b64_json",
 	}
 
 	b, _ := json.Marshal(body)
@@ -108,7 +108,7 @@ func editImageOnce(cfg Config, prompt string, imageBytes []byte) (*Result, error
 	_ = w.WriteField("prompt", prompt)
 	_ = w.WriteField("size", cfg.Size)
 	_ = w.WriteField("n", "1")
-	_ = w.WriteField("response_format", "url")
+	_ = w.WriteField("response_format", "b64_json")
 
 	fw, err := w.CreateFormFile("image", "image.png")
 	if err != nil {

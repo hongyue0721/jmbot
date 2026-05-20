@@ -3,7 +3,6 @@ package app
 import (
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -91,9 +90,18 @@ func (a *App) handleAIImageCommand(rawMessage string, data map[string]any, messa
 		return true
 	}
 
-	imageRef := result.ImageURL
-	if imageRef == "" && result.B64JSON != "" {
-		imageRef = "base64://" + result.B64JSON
+	var imageRef string
+	if result.B64JSON != "" {
+		imageRef = "base64://" + strings.TrimPrefix(result.B64JSON, "data:image/")
+		if idx := strings.Index(imageRef, ","); idx > 0 {
+			imageRef = "base64://" + imageRef[idx+1:]
+		}
+	} else if strings.HasPrefix(result.ImageURL, "data:") {
+		if idx := strings.Index(result.ImageURL, ","); idx > 0 {
+			imageRef = "base64://" + result.ImageURL[idx+1:]
+		}
+	} else {
+		imageRef = result.ImageURL
 	}
 	if imageRef == "" {
 		msg := "AI 画图返回为空"
