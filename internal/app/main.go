@@ -648,6 +648,8 @@ func fillDefaults(cfg *Config) {
 	if cfg.RegexEnabledGroup == nil {
 		cfg.RegexEnabledGroup = map[string]bool{}
 	}
+	// 默认开启regex模式，避免未配置时频繁触发
+	cfg.RegexEnabledGlobal = true
 	if strings.TrimSpace(cfg.CardNickname) == "" {
 		cfg.CardNickname = "文件助手"
 	}
