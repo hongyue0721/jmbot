@@ -67,7 +67,7 @@ func generateImageOnce(cfg Config, prompt string) (*Result, error) {
 
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("API status %d", resp.StatusCode)
+		return nil, fmt.Errorf("API %d: %s", resp.StatusCode, extractAPIError(raw))
 	}
 
 	var apiResp struct {
@@ -77,25 +77,12 @@ func generateImageOnce(cfg Config, prompt string) (*Result, error) {
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &apiResp); err != nil {
-		return nil, fmt.Errorf("parse response failed")
+		return nil, fmt.Errorf("parse response failed: %s", extractAPIError(raw))
 	}
 	if len(apiResp.Data) == 0 {
 		return nil, fmt.Errorf("API returned empty data")
 	}
 	return &Result{ImageURL: apiResp.Data[0].URL, B64JSON: apiResp.Data[0].B64JSON}, nil
-}
-
-func EditImage(cfg Config, prompt string, imageBytes []byte) (*Result, error) {
-	var result *Result
-	var lastErr error
-	for i := 0; i < cfg.MaxRetries; i++ {
-		result, lastErr = editImageOnce(cfg, prompt, imageBytes)
-		if lastErr == nil {
-			return result, nil
-		}
-		log.Printf("AI edit attempt %d/%d failed: %v", i+1, cfg.MaxRetries, lastErr)
-	}
-	return nil, fmt.Errorf("AI 图生图失败（已重试%d次）：%s", cfg.MaxRetries-1, briefError(lastErr))
 }
 
 func editImageOnce(cfg Config, prompt string, imageBytes []byte) (*Result, error) {
@@ -135,7 +122,7 @@ func editImageOnce(cfg Config, prompt string, imageBytes []byte) (*Result, error
 
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("API status %d", resp.StatusCode)
+		return nil, fmt.Errorf("API %d: %s", resp.StatusCode, extractAPIError(raw))
 	}
 
 	var apiResp struct {
@@ -145,12 +132,46 @@ func editImageOnce(cfg Config, prompt string, imageBytes []byte) (*Result, error
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &apiResp); err != nil {
-		return nil, fmt.Errorf("parse response failed")
+		return nil, fmt.Errorf("parse response failed: %s", extractAPIError(raw))
 	}
 	if len(apiResp.Data) == 0 {
 		return nil, fmt.Errorf("API returned empty data")
 	}
 	return &Result{ImageURL: apiResp.Data[0].URL, B64JSON: apiResp.Data[0].B64JSON}, nil
+}
+
+var errModelNotSupportImage = "does not support image input"
+
+func EditImage(cfg Config, prompt string, imageBytes []byte) (*Result, error) {
+	var result *Result
+	var lastErr error
+	for i := 0; i < cfg.MaxRetries; i++ {
+		result, lastErr = editImageOnce(cfg, prompt, imageBytes)
+		if lastErr == nil {
+			return result, nil
+		}
+		if strings.Contains(lastErr.Error(), errModelNotSupportImage) {
+			return nil, fmt.Errorf("当前模型不支持图生图，请使用纯文本生图")
+		}
+		log.Printf("AI edit attempt %d/%d failed: %v", i+1, cfg.MaxRetries, lastErr)
+	}
+	return nil, fmt.Errorf("AI 图生图失败（已重试%d次）：%s", cfg.MaxRetries-1, briefError(lastErr))
+}
+
+func extractAPIError(raw []byte) string {
+	var errResp struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(raw, &errResp) == nil && errResp.Error.Message != "" {
+		return errResp.Error.Message
+	}
+	s := strings.TrimSpace(string(raw))
+	if len(s) > 300 {
+		s = s[:300]
+	}
+	return s
 }
 
 func briefError(err error) string {

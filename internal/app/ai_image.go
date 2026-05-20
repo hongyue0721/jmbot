@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -11,7 +12,6 @@ import (
 )
 
 func (a *App) handleAIImageCommand(rawMessage string, data map[string]any, messageType string, groupID, userID int64) bool {
-	// image on / off / help
 	if m := mustMatch(`^(?:/)?image\s+(on|off|help)$`, rawMessage); m != nil {
 		switch m[1] {
 		case "on":
@@ -68,16 +68,37 @@ func (a *App) handleAIImageCommand(rawMessage string, data map[string]any, messa
 		MaxRetries: cfg.AIImageMaxRetries,
 	}
 
-	a.sendMessage(messageType, groupID, userID, "正在生成图片...")
+	useImageToImage := false
+	imageBytes, extractErr := a.extractAIImageBytes(data)
+	if extractErr != nil {
+		log.Printf("[AI Image] extract image failed: %v", extractErr)
+	}
+	if len(imageBytes) > 0 {
+		useImageToImage = true
+	}
 
-	imageBytes, _ := a.extractAIImageBytes(data)
+	waitingImageSent := false
+	if messageType == "group" && groupID > 0 {
+		if cfg.AIImageWaitingImage != "" {
+			waitingImageSent = a.bot.SendGroupImage(groupID, cfg.AIImageWaitingImage)
+		}
+	}
 
 	var result *aiimage.Result
 	var err error
 
-	if len(imageBytes) > 0 {
+	if useImageToImage {
 		result, err = aiimage.EditImage(aiCfg, prompt, imageBytes)
+		if strings.Contains(err.Error(), "不支持图生图") {
+			if !waitingImageSent && messageType == "group" && groupID > 0 {
+				a.bot.SendGroupMsgWithAtText(groupID, userID, "当前模型不支持图生图，正在尝试文生图...")
+			}
+			result, err = aiimage.GenerateImage(aiCfg, prompt)
+		}
 	} else {
+		if !waitingImageSent && !(messageType == "group" && groupID > 0) {
+			a.sendMessage(messageType, groupID, userID, "正在生成图片...")
+		}
 		result, err = aiimage.GenerateImage(aiCfg, prompt)
 	}
 
@@ -135,6 +156,13 @@ func (a *App) extractAIImageBytes(data map[string]any) ([]byte, error) {
 					return src.ImageBytes, nil
 				}
 			}
+			refs := extractSoutuImageFileRefsFromEvent(msgData)
+			for _, ref := range refs {
+				u, getErr := a.bot.GetImageURL(ref)
+				if getErr == nil && u != "" {
+					return downloadImageBytes(u)
+				}
+			}
 		}
 	}
 
@@ -189,5 +217,5 @@ func downloadImageBytes(imageURL string) ([]byte, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("download image status %d", resp.StatusCode)
 	}
-	return 	io.ReadAll(resp.Body)
+	return io.ReadAll(resp.Body)
 }

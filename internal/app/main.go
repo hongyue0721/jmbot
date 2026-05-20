@@ -126,7 +126,8 @@ type Config struct {
 	AIImageModel     string `yaml:"ai_image_model"`
 	AIImageSize      string `yaml:"ai_image_size"`
 	AIImageTimeout   int    `yaml:"ai_image_timeout_seconds"`
-	AIImageMaxRetries int   `yaml:"ai_image_max_retries"`
+	AIImageMaxRetries  int    `yaml:"ai_image_max_retries"`
+	AIImageWaitingImage string `yaml:"ai_image_waiting_image"`
 }
 
 type App struct {
@@ -4791,6 +4792,16 @@ func buildMarkdownCard(nickname, message string) string {
 
 func (c *NapcatClient) SendPrivateFile(cfg Config, userID int64, filePath string) bool {
 	return c.sendFile(cfg, "send_private_msg", map[string]any{"user_id": userID}, filePath)
+}
+
+func (c *NapcatClient) SendGroupImage(groupID int64, imageFile string) bool {
+	_, err := c.send("send_group_msg", map[string]any{
+		"group_id": groupID,
+		"message": []map[string]any{
+			{"type": "image", "data": map[string]any{"file": imageFile}},
+		},
+	}, echo("group_img", groupID), 60*time.Second)
+	return err == nil
 }
 
 func (c *NapcatClient) SendGroupMsgWithAtAndImage(groupID, userID int64, imageFile string) bool {
