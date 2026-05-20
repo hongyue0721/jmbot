@@ -96,6 +96,8 @@ type Config struct {
 	RandomPasswordEnabledGroup  map[string]bool `yaml:"random_password_enabled_group"`
 	RegexEnabledGlobal          bool            `yaml:"regex_enabled_global"`
 	RegexEnabledGroup           map[string]bool `yaml:"regex_enabled_group"`
+	StrictModeGlobal            bool            `yaml:"strict_mode_global"`
+	StrictModeGroup             map[string]bool `yaml:"strict_mode_group"`
 
 	BannedID    []string `yaml:"banned_id"`
 	BannedUser  []string `yaml:"banned_user"`
@@ -648,6 +650,9 @@ func fillDefaults(cfg *Config) {
 	}
 	if cfg.RegexEnabledGroup == nil {
 		cfg.RegexEnabledGroup = map[string]bool{}
+	}
+	if cfg.StrictModeGroup == nil {
+		cfg.StrictModeGroup = map[string]bool{}
 	}
 	// 默认开启regex模式，避免未配置时频繁触发
 	cfg.RegexEnabledGlobal = true
@@ -1329,6 +1334,22 @@ func (a *App) handleMessageEvent(data map[string]any) {
 		a.sendMessage(messageType, groupID, userID, "正则模式已更新")
 		return
 	}
+	if m := mustMatch(`^/jm\s+strict\s+(on|off)$`, rawMessage); m != nil {
+		if !a.requireAdmin(messageType, groupID, userID, "仅管理员可设置严格模式") {
+			return
+		}
+		enabled := m[1] == "on"
+		a.cfgMu.Lock()
+		if messageType == "group" && groupID > 0 {
+			a.cfg.StrictModeGroup[strconv.FormatInt(groupID, 10)] = enabled
+		} else {
+			a.cfg.StrictModeGlobal = enabled
+		}
+		a.cfgMu.Unlock()
+		a.saveConfig()
+		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("严格模式已%s", map[bool]string{true: "开启", false: "关闭"}[enabled]))
+		return
+	}
 	if matched(`^/jm\s+goodluck$`, rawMessage) || matched(`^/goodluck$`, rawMessage) || rawMessage == "随机本子" {
 		id, ok := a.randomExistingJMID()
 		if !ok {
@@ -1820,6 +1841,12 @@ func (a *App) handleMessageEvent(data map[string]any) {
 		return
 	}
 
+	// 严格模式检查：只处理以/jm开头的消息
+	strictMode := a.getStrictMode(messageType, groupID)
+	if strictMode && !strings.HasPrefix(strings.TrimSpace(rawMessage), "/jm") {
+		return
+	}
+
 	regexEnabled := a.getRegexEnabled(messageType, groupID)
 	numbers := extractJMNumbersFromEvent(data, regexEnabled)
 	if len(numbers) > 0 {
@@ -2189,6 +2216,17 @@ func (a *App) getRegexEnabled(messageType string, groupID int64) bool {
 		}
 	}
 	return a.cfg.RegexEnabledGlobal
+}
+
+func (a *App) getStrictMode(messageType string, groupID int64) bool {
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	if messageType == "group" {
+		if v, ok := a.cfg.StrictModeGroup[strconv.FormatInt(groupID, 10)]; ok {
+			return v
+		}
+	}
+	return a.cfg.StrictModeGlobal
 }
 
 func (a *App) enqueueDownloads(numbers []string, messageType string, groupID, userID int64, data map[string]any) {
@@ -4269,6 +4307,7 @@ func helpMessage() string {
 		"9) /jm randpwd on|off：启用随机密码加密\n" +
 		"10) /jm fname jm|full|current：设置发送文件命名方式\n" +
 		"11) /jm regex on|off：设置正则模式\n" +
+		"12) /jm strict on|off：设置严格模式（只处理/jm开头的消息）\n" +
 		"12) /jm dedup show|set|clear：重复请求冷却管理（管理员）\n" +
 		"13) /jm cfg list|show|set：在线配置开关（管理员）\n" +
 		"14) /jm daily on|off：启用/关闭每日本子推荐（管理员）\n" +
