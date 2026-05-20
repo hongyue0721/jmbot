@@ -3416,6 +3416,7 @@ func (a *App) previewPublicURL(id string) string {
 
 func findPDF(dir, number, title string) (string, string) {
 	if number != "" {
+		// 精确匹配：{number}.pdf 或 JM{number}.pdf
 		for _, n := range []string{number + ".pdf", "JM" + number + ".pdf"} {
 			p := filepath.Join(dir, n)
 			if fileExists(p) {
@@ -3430,17 +3431,23 @@ func findPDF(dir, number, title string) (string, string) {
 			return p, n
 		}
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return "", ""
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
+	// 模糊匹配：只匹配以JM{number}_开头或完全包含{number}.pdf的文件
+	if number != "" {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return "", ""
 		}
-		name := e.Name()
-		if strings.HasSuffix(strings.ToLower(name), ".pdf") && strings.Contains(name, number) {
-			return filepath.Join(dir, name), name
+		prefix := "JM" + number + "_"
+		suffix := number + ".pdf"
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if strings.HasSuffix(strings.ToLower(name), ".pdf") &&
+				(strings.HasPrefix(name, prefix) || strings.HasSuffix(name, suffix)) {
+				return filepath.Join(dir, name), name
+			}
 		}
 	}
 	return "", ""
