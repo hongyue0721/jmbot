@@ -34,15 +34,36 @@
 ### 2.1 命令能力
 - `/jm <ID>`：下载并发送
 - `/jm look <ID>`：查看本子信息
-- `/jm search <关键词>`：检索最佳匹配，回复“确认”后下载
+- `/jm search <关键词>`：搜索本子（聚合搜索哔咔+JM）
 - `/jm search` / `识图` / `/jm识图`：进入识图窗口（默认 120 秒）
 - `/jm goodluck`：随机本子
 - `/jm mode pdf|zip`：发送格式
 - `/jm enc on|off`、`/jm passwd <密码>`、`/jm randpwd on|off`
 - `/jm fname jm|full|current`：文件命名（`current`=保持旧规则）
 - `/jm regex on|off`：正则提取模式
+- `/jm strict on|off`：严格模式（只处理/jm开头的消息）
+- `/jm daily on|off|now`：每日推荐
+- `/jm help`：查看帮助
 
-### 2.2 哔咔漫画源
+**确认下载**：
+- `确认 1` 或 `1` - 下载第1个结果
+- `确认 1 2 3` 或 `1 2 3` - 批量下载
+
+### 2.2 严格模式
+开启后只处理以 `/jm` 开头的消息，避免普通聊天触发本子下载：
+```
+/jm strict on    # 开启
+/jm strict off   # 关闭
+```
+
+**示例：**
+```
+/jm 123456,789012   → 正常下载
+普通聊天消息        → 忽略
+/jm 本子号1，本子号2(一段字符串)本子号3 → 提取多个本子号下载
+```
+
+### 2.3 哔咔漫画源
 - `/bika on|off`：启用/关闭哔咔（管理员）
 - `/bika login <邮箱> <密码>`：登录哔咔账号
 - `/bika logout`：退出当前账号
@@ -60,13 +81,26 @@
 - 其他用户可登录自己的账号
 - 未登录用户使用全局账号
 
-### 2.3 识图联动
-- 识图成功后，会自动提取标题关键词（含中日文片段）并走 `/jm search` 同款检索逻辑
-- 命中后自动写入待确认队列，回复“确认”即可下载
+### 2.4 聚合搜索
+使用 `搜索 <关键词>` 或 `/jm search <关键词>` 会同时搜索哔咔和JM，结果以 `[Bika]` 或 `[JM]` 标记来源。
 
-### 2.3 发送策略
-- 普通消息默认纯文本
-- 批量任务通知可按 `reply_as_card` 使用转发卡片（仅批量场景）
+### 2.5 每日推荐
+- `/jm daily on`：启用每日推荐
+- `/jm daily off`：关闭每日推荐
+- `/jm daily add <群号>`：添加推荐群
+- `/jm daily del <群号>`：删除推荐群
+- `/jm daily now`：立即发送推荐
+
+每日推荐发送哔咔日榜（优先）或JM热门本子，用户可回复序号下载。
+
+### 2.6 识图联动
+- 识图成功后，会自动提取标题关键词（含中日文片段）并走 `/jm search` 同款检索逻辑
+- 命中后自动写入待确认队列，回复"确认"即可下载
+
+### 2.7 发送策略
+- 本子以转发卡片形式发送（信息+封面+文件）
+- 文件通过QQ正式上传，聊天记录中可永久打开
+- CBZ文件本地保留，PDF发送后延迟24小时删除
 
 ## 3. 配置说明
 
@@ -90,10 +124,16 @@
 - `transfer_mode`：默认建议 `local`
 - `remote_temp_dir`：支持 `${USER}` 变量，如 `/tmp/napcat-jm-go-${USER}/temp`
 - `jm_option_path`：默认 `./configs/option.yml`
+- `jm_proxy`：JM下载代理（如 `socks5://127.0.0.1:1080`）
 - `file_dir` / `manga_dir` / `cbz_dir`
 - `soutu_*`：识图请求参数
 - `cf_bypass_api_url`：外置 bypass 地址（推荐生产使用）
 - `embedded_bypass_enabled`：是否启用内置 bypass（需要本机 chrome/chromium）
+
+**模式配置**：
+- `regex_enabled_global`：正则模式（默认 `true`）
+- `strict_mode_global`：严格模式（默认 `false`）
+- `max_concurrent_downloads`：并发下载数（默认 `3`）
 
 **哔咔配置**：
 - `bika_enabled`：是否启用哔咔（默认 `false`）
@@ -101,6 +141,12 @@
 - `bika_token`：登录 token（管理员登录后自动设置）
 - `bika_quality`：图片画质（`original` / `high` / `middle` / `low`）
 - `bika_proxy`：HTTP 代理（如 `http://127.0.0.1:1081`）
+
+**每日推荐配置**：
+- `daily_recommend_enabled`：是否启用（默认 `false`）
+- `daily_recommend_hour`：发送时间-小时（默认 `0`）
+- `daily_recommend_minute`：发送时间-分钟（默认 `0`）
+- `daily_recommend_groups`：发送群列表
 
 ## 4. 运行方式
 
