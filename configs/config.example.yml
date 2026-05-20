@@ -121,3 +121,4 @@ ai_image_model: "dall-e-3"           # 模型名
 ai_image_size: "1024x1024"           # 图片尺寸
 ai_image_timeout_seconds: 120        # 请求超时（秒）
 ai_image_max_retries: 3              # 失败重试次数
+ai_image_waiting_image: ""           # 等待时发送的图片 URL 或 base64://（空则不发送）
