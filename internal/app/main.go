@@ -54,6 +54,7 @@ type Config struct {
 	CBZSeriesEnabled  bool   `yaml:"cbz_series_enabled"`
 	LogDir            string `yaml:"log_dir"`
 	JMOptionPath      string `yaml:"jm_option_path"`
+	JMProxy           string `yaml:"jm_proxy"` // JM下载代理
 	TransferMode      string `yaml:"transfer_mode"`
 	RemoteUser        string `yaml:"remote_user"`
 	RemoteHost        string `yaml:"remote_host"`
@@ -95,10 +96,13 @@ type Config struct {
 	RandomPasswordEnabledGroup  map[string]bool `yaml:"random_password_enabled_group"`
 	RegexEnabledGlobal          bool            `yaml:"regex_enabled_global"`
 	RegexEnabledGroup           map[string]bool `yaml:"regex_enabled_group"`
+	StrictModeGlobal            bool            `yaml:"strict_mode_global"`
+	StrictModeGroup             map[string]bool `yaml:"strict_mode_group"`
 
 	BannedID    []string `yaml:"banned_id"`
 	BannedUser  []string `yaml:"banned_user"`
 	BannedGroup []string `yaml:"banned_group"`
+	AllowedGroup []int64 `yaml:"allowed_group"` // 白名单群聊，为空时所有群生效
 
 	ReplyAsCard  bool   `yaml:"reply_as_card"`
 	CardNickname string `yaml:"card_nickname"`
@@ -449,7 +453,7 @@ func NewApp(configPath, configExamplePath string) (*App, error) {
 		cfgPath:    configPath,
 		cfg:        cfg,
 		bot:        NewNapcatClient(cfg.WebsocketURL, cfg.WebsocketToken, cfg.LocalTestMode),
-		jm:         NewJMBridge(cfg.JMOptionPath, cfg.FileDir, cfg.MangaDir, cfg.CBZDir, cfg.DownloadTimeout, cfg.LocalTestMode),
+		jm:         NewJMBridge(cfg.JMOptionPath, cfg.FileDir, cfg.MangaDir, cfg.CBZDir, cfg.DownloadTimeout, cfg.LocalTestMode, cfg.JMProxy),
 		queue:      make(chan DownloadTask, 1024),
 		recent:     map[string]map[string]time.Time{},
 		search:     map[string]PendingSearch{},
@@ -657,6 +661,11 @@ func fillDefaults(cfg *Config) {
 	if cfg.RegexEnabledGroup == nil {
 		cfg.RegexEnabledGroup = map[string]bool{}
 	}
+	if cfg.StrictModeGroup == nil {
+		cfg.StrictModeGroup = map[string]bool{}
+	}
+	// 默认开启regex模式，避免未配置时频繁触发
+	cfg.RegexEnabledGlobal = true
 	if strings.TrimSpace(cfg.CardNickname) == "" {
 		cfg.CardNickname = "文件助手"
 	}
@@ -1360,6 +1369,22 @@ func (a *App) handleMessageEvent(data map[string]any) {
 		a.sendMessage(messageType, groupID, userID, "正则模式已更新")
 		return
 	}
+	if m := mustMatch(`^/jm\s+strict\s+(on|off)$`, rawMessage); m != nil {
+		if !a.requireAdmin(messageType, groupID, userID, "仅管理员可设置严格模式") {
+			return
+		}
+		enabled := m[1] == "on"
+		a.cfgMu.Lock()
+		if messageType == "group" && groupID > 0 {
+			a.cfg.StrictModeGroup[strconv.FormatInt(groupID, 10)] = enabled
+		} else {
+			a.cfg.StrictModeGlobal = enabled
+		}
+		a.cfgMu.Unlock()
+		a.saveConfig()
+		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("严格模式已%s", map[bool]string{true: "开启", false: "关闭"}[enabled]))
+		return
+	}
 	if matched(`^/jm\s+goodluck$`, rawMessage) || matched(`^/goodluck$`, rawMessage) || rawMessage == "随机本子" {
 		id, ok := a.randomExistingJMID()
 		if !ok {
@@ -1430,6 +1455,47 @@ func (a *App) handleMessageEvent(data map[string]any) {
 		a.cfgMu.Unlock()
 		a.saveConfig()
 		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("章节数阈值已设为 %d", n))
+		return
+	}
+	if m := mustMatch(`^/jm\s+allow\s+add\s+(\d+)$`, rawMessage); m != nil {
+		if !a.requireAdmin(messageType, groupID, userID, "仅管理员可操作") {
+			return
+		}
+		gid, _ := strconv.ParseInt(m[1], 10, 64)
+		a.cfgMu.Lock()
+		if !containsInt64(a.cfg.AllowedGroup, gid) {
+			a.cfg.AllowedGroup = append(a.cfg.AllowedGroup, gid)
+		}
+		a.cfgMu.Unlock()
+		a.saveConfig()
+		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("已添加白名单群：%d", gid))
+		return
+	}
+	if m := mustMatch(`^/jm\s+allow\s+del\s+(\d+)$`, rawMessage); m != nil {
+		if !a.requireAdmin(messageType, groupID, userID, "仅管理员可操作") {
+			return
+		}
+		gid, _ := strconv.ParseInt(m[1], 10, 64)
+		a.cfgMu.Lock()
+		a.cfg.AllowedGroup = removeInt64(a.cfg.AllowedGroup, gid)
+		a.cfgMu.Unlock()
+		a.saveConfig()
+		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("已移除白名单群：%d", gid))
+		return
+	}
+	if matched(`^/jm\s+allow\s+list$`, rawMessage) {
+		a.cfgMu.RLock()
+		groups := a.cfg.AllowedGroup
+		a.cfgMu.RUnlock()
+		if len(groups) == 0 {
+			a.sendMessage(messageType, groupID, userID, "白名单为空，所有群均可使用")
+		} else {
+			var ids []string
+			for _, g := range groups {
+				ids = append(ids, strconv.FormatInt(g, 10))
+			}
+			a.sendMessage(messageType, groupID, userID, "白名单群："+strings.Join(ids, ", "))
+		}
 		return
 	}
 	if matched(`^/jm\s+daily\s+on$`, rawMessage) {
@@ -1851,6 +1917,12 @@ func (a *App) handleMessageEvent(data map[string]any) {
 		return
 	}
 
+	// 严格模式检查：只处理以/jm开头的消息
+	strictMode := a.getStrictMode(messageType, groupID)
+	if strictMode && !strings.HasPrefix(strings.TrimSpace(rawMessage), "/jm") {
+		return
+	}
+
 	regexEnabled := a.getRegexEnabled(messageType, groupID)
 	numbers := extractJMNumbersFromEvent(data, regexEnabled)
 	if len(numbers) > 0 {
@@ -2200,14 +2272,30 @@ func (a *App) clearRecentRequest(number string) int {
 func (a *App) isJMAllowed(messageType string, groupID, userID int64) bool {
 	a.cfgMu.RLock()
 	defer a.cfgMu.RUnlock()
-	if messageType == "group" && contains(a.cfg.BannedGroup, strconv.FormatInt(groupID, 10)) {
-		a.sendMessage(messageType, groupID, userID, "禁漫功能未开启")
+
+	// 私聊始终允许
+	if messageType != "group" {
+		return true
+	}
+
+	// 检查黑名单群
+	if contains(a.cfg.BannedGroup, strconv.FormatInt(groupID, 10)) {
+		a.sendMessage(messageType, groupID, userID, "该群已被禁止使用")
 		return false
 	}
+
+	// 检查白名单（如果设置了白名单，只允许白名单中的群）
+	if len(a.cfg.AllowedGroup) > 0 && !containsInt64(a.cfg.AllowedGroup, groupID) {
+		a.sendMessage(messageType, groupID, userID, "该群未在白名单中")
+		return false
+	}
+
+	// 检查黑名单用户
 	if contains(a.cfg.BannedUser, strconv.FormatInt(userID, 10)) {
 		a.sendMessage(messageType, groupID, userID, "禁止下载或用户被封禁")
 		return false
 	}
+
 	return true
 }
 
@@ -2220,6 +2308,17 @@ func (a *App) getRegexEnabled(messageType string, groupID int64) bool {
 		}
 	}
 	return a.cfg.RegexEnabledGlobal
+}
+
+func (a *App) getStrictMode(messageType string, groupID int64) bool {
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	if messageType == "group" {
+		if v, ok := a.cfg.StrictModeGroup[strconv.FormatInt(groupID, 10)]; ok {
+			return v
+		}
+	}
+	return a.cfg.StrictModeGlobal
 }
 
 func (a *App) enqueueDownloads(numbers []string, messageType string, groupID, userID int64, data map[string]any) {
@@ -2829,18 +2928,20 @@ func (a *App) sendComicInfoForwardMessage(messageType string, groupID, userID in
 		return false
 	}
 
+	sent := false
 	for retry := 0; retry < 3; retry++ {
 		params := copyMap(baseParams)
 		params["message"] = nodes
 		_, err := a.bot.send(action, params, echo("forward_comic_info", groupID), 60*time.Second)
 		if err == nil {
-			return true
+			sent = true
+			break
 		}
 		log.Printf("[ForwardInfo] 发送失败 (重试%d/3): %v", retry+1, err)
 		time.Sleep(2 * time.Second)
 	}
-	a.sendMessage(messageType, groupID, userID, text)
-	return false
+
+	return sent
 }
 
 func (a *App) sendMessage(messageType string, groupID, userID int64, message string) {
@@ -3349,6 +3450,7 @@ func (a *App) previewPublicURL(id string) string {
 
 func findPDF(dir, number, title string) (string, string) {
 	if number != "" {
+		// 精确匹配：{number}.pdf 或 JM{number}.pdf
 		for _, n := range []string{number + ".pdf", "JM" + number + ".pdf"} {
 			p := filepath.Join(dir, n)
 			if fileExists(p) {
@@ -3363,17 +3465,23 @@ func findPDF(dir, number, title string) (string, string) {
 			return p, n
 		}
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return "", ""
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
+	// 模糊匹配：只匹配以JM{number}_开头或完全包含{number}.pdf的文件
+	if number != "" {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return "", ""
 		}
-		name := e.Name()
-		if strings.HasSuffix(strings.ToLower(name), ".pdf") && strings.Contains(name, number) {
-			return filepath.Join(dir, name), name
+		prefix := "JM" + number + "_"
+		suffix := number + ".pdf"
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if strings.HasSuffix(strings.ToLower(name), ".pdf") &&
+				(strings.HasPrefix(name, prefix) || strings.HasSuffix(name, suffix)) {
+				return filepath.Join(dir, name), name
+			}
 		}
 	}
 	return "", ""
@@ -4298,8 +4406,11 @@ func helpMessage() string {
 		"9) /jm randpwd on|off：启用随机密码加密\n" +
 		"10) /jm fname jm|full|current：设置发送文件命名方式\n" +
 		"11) /jm regex on|off：设置正则模式\n" +
+		"12) /jm strict on|off：设置严格模式（只处理/jm开头的消息）\n" +
 		"12) /jm dedup show|set|clear：重复请求冷却管理（管理员）\n" +
 		"13) /jm cfg list|show|set：在线配置开关（管理员）\n" +
+		"14) /jm allow add|del <群号>：管理白名单群（管理员）\n" +
+		"15) /jm allow list：查看白名单群（管理员）\n" +
 		"14) /jm daily on|off：启用/关闭每日本子推荐（管理员）\n" +
 		"15) /jm daily add|del <群号>：添加/删除推荐群（管理员）\n" +
 		"16) /jm daily now：立即发送每日推荐（管理员）\n" +
