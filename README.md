@@ -321,11 +321,13 @@ kill <pid>
 - 生产建议用 `systemd` + 外置 bypass API
 - 主端口建议固定（`http_port_fallback: false`），避免 NapCat 回调漂移
 
-## 11. AI 画图功能
+## 11. 更新日志
 
-本插件支持通过 OpenAI 兼容 API 进行 AI 图像生成，以同进程插件方式集成，不修改 JM/哔咔/下载/识图等核心逻辑。
+### 2026-05-20 v2 — 新增 AI 画图插件
 
-### 指令
+以同进程插件方式集成 AI 图像生成，不修改 JM/哔咔/下载/识图等核心逻辑。
+
+**新增指令**
 
 | 指令 | 说明 | 权限 |
 |------|------|------|
@@ -334,13 +336,15 @@ kill <pid>
 | `image2 <提示词>` | 根据文字生成图片 | 所有人 |
 | 回复图片 + `image2 <提示词>` | 以回复的图片为参考进行图生图 | 所有人 |
 
-### 图生图说明
+**功能说明**
+- 图生图：引用带图片的消息发送 `image2 <提示词>`，自动提取引用图片作为参考，调用 `/v1/images/edits` 端点
+- 若模型不支持图生图（如 `gpt-image-2`），自动降级为文生图并提示用户
+- 失败自动重试（默认 3 次），错误信息从 API 响应体中提取而非仅返回状态码
+- 提取引用图片时先查 `url`/`base64`，若无则通过 `get_image` 解析 `file` UUID
+- 生成时先发送等待图片（四色旋转 spinner），结果生成后发送最终图片
+- 引用图片提取失败写日志，不再静默降级
 
-引用带图片的消息发送 `image2 <提示词>`，将自动提取引用的图片作为参考图，调用 API 的 `/v1/images/edits` 端点进行图生图。
-
-若当前模型不支持图生图（如 `gpt-image-2`），会自动降级为文生图，并提示用户。
-
-### 配置项
+**新增配置项**
 
 ```yaml
 ai_image_enabled: false              # 是否启用 AI 画图
@@ -350,14 +354,21 @@ ai_image_model: "dall-e-3"           # 模型名
 ai_image_size: "1024x1024"           # 图片尺寸
 ai_image_timeout_seconds: 300        # 请求超时（秒），默认 5 分钟
 ai_image_max_retries: 3              # 失败重试次数
-ai_image_waiting_image: ""           # 等待时发送的图片（URL 或 base64://，空则使用默认 spinner）
+ai_image_waiting_image: ""           # 等待图片（URL 或 base64://，空则使用默认 spinner）
 ```
 
-### 技术实现
+**新增文件**
+- `internal/aiimage/aiimage.go` — OpenAI 兼容 API 客户端（文生图/图生图/重试/错误提取）
+- `internal/app/ai_image.go` — App 命令处理层（消息解析/图片提取/结果发送）
 
-- `internal/aiimage/`：独立 API 客户端包，封装 `GenerateImage`（文生图）和 `EditImage`（图生图），支持重试和错误提取
-- `internal/app/ai_image.go`：App 级命令处理层，负责消息解析、图片提取、结果发送
-- `image on/off` 状态持久化到 `config.yml`，重启后保留
-- API Key 支持环境变量 `AI_IMAGE_API_KEY` 回退，避免写入配置文件
-- 生成时先发送等待图片（默认四色旋转 spinner），结果生成后发送最终图片
-- 图片提取优先级：引用消息图片 > 当前消息图片 > 纯文生图
+**修改文件**
+- `internal/app/main.go` — Config 新增 7 个字段 + fillDefaults + SendGroupImage + GetMsg/SendGroupMsgWithAtAndImage/SendPrivateMsgWithImage/SendGroupMsgWithAtText
+- `configs/config.example.yml` — AI 画图配置示例
+- `README.md` — 本更新日志
+
+### 2026-05-20 v1 — 修复引用图生图
+
+- 修复 `extractAIImageBytes` 对回复消息缺少 `file` ref 回退的问题，补充 `extractSoutuImageFileRefsFromEvent` 路径
+- API 错误不再只返回状态码，改为从响应体提取 `error.message`
+- 提取失败不再静默忽略，写日志记录
+- 新增 `ai_image_waiting_image` 支持生成等待图
