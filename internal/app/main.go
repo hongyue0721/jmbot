@@ -685,6 +685,9 @@ func fillDefaults(cfg *Config) {
 	if cfg.AIImageMaxRetries <= 0 {
 		cfg.AIImageMaxRetries = 3
 	}
+	if cfg.AIImageWaitingImage == "" {
+		cfg.AIImageWaitingImage = defaultWaitingImage
+	}
 }
 
 func serveHTTP(name string, srv *http.Server, ln net.Listener) {
