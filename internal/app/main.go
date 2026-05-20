@@ -2734,6 +2734,8 @@ func (a *App) sendComicForwardMessage(messageType string, groupID, userID int64,
 	// 准备文件
 	coverPrepared := false
 	filePrepared := false
+	var coverCleanup func()
+	var fileCleanup func()
 
 	nodes := make([]map[string]any, 0, 3)
 
@@ -2753,6 +2755,7 @@ func (a *App) sendComicForwardMessage(messageType string, groupID, userID int64,
 	if coverPath != "" && fileExists(coverPath) {
 		if pf, err := a.bot.prepareForwardFile(cfg, coverPath); err == nil && len(pf.candidates) > 0 {
 			coverPrepared = true
+			coverCleanup = pf.cleanup
 			nodes = append(nodes, map[string]any{
 				"type": "node",
 				"data": map[string]any{
@@ -2782,6 +2785,7 @@ func (a *App) sendComicForwardMessage(messageType string, groupID, userID int64,
 	if filePath != "" && fileExists(filePath) {
 		if pf, err := a.bot.prepareForwardFile(cfg, filePath); err == nil && len(pf.candidates) > 0 {
 			filePrepared = true
+			fileCleanup = pf.cleanup
 			nodes = append(nodes, map[string]any{
 				"type": "node",
 				"data": map[string]any{
@@ -2809,17 +2813,28 @@ func (a *App) sendComicForwardMessage(messageType string, groupID, userID int64,
 		baseParams = map[string]any{"user_id": userID}
 	}
 
+	sent := false
 	for retry := 0; retry < 3; retry++ {
 		params := copyMap(baseParams)
 		params["message"] = nodes
 		_, err := a.bot.send(action, params, echo("forward_comic", groupID), 600*time.Second)
 		if err == nil {
-			return true
+			sent = true
+			break
 		}
 		log.Printf("[Forward] 发送失败 (重试%d/3): %v", retry+1, err)
 		time.Sleep(3 * time.Second)
 	}
-	return false
+
+	// 清理临时文件
+	if coverCleanup != nil {
+		coverCleanup()
+	}
+	if fileCleanup != nil {
+		fileCleanup()
+	}
+
+	return sent
 }
 
 func (a *App) sendMessage(messageType string, groupID, userID int64, message string) {
