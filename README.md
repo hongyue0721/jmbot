@@ -180,7 +180,7 @@ docker compose down
 - `ai_image_base_url`：OpenAI 兼容 API 地址（默认 `http://47.104.6.123:3000/v1`）
 - `ai_image_model`：模型名称（默认 `gpt-image-2`）
 - `ai_image_size`：图片尺寸（默认 `1024x1024`）
-- `ai_image_timeout`：请求超时秒数（默认 `120`）
+- `ai_image_timeout`：请求超时秒数（默认 `300`，5 分钟）
 - `ai_image_max_retries`：失败重试次数（默认 `3`）
 - `ai_image_waiting_image`：等待时发送的图片（URL 或 `base64://`，空则不发送）
 

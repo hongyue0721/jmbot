@@ -680,7 +680,7 @@ func fillDefaults(cfg *Config) {
 		cfg.AIImageSize = "1024x1024"
 	}
 	if cfg.AIImageTimeout <= 0 {
-		cfg.AIImageTimeout = 120
+		cfg.AIImageTimeout = 300
 	}
 	if cfg.AIImageMaxRetries <= 0 {
 		cfg.AIImageMaxRetries = 3
