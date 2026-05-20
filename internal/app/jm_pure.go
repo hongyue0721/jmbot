@@ -71,6 +71,7 @@ type JMBridge struct {
 	cbzDir     string
 	timeoutSec int
 	localTest  bool
+	proxy      string
 
 	client *http.Client
 
@@ -84,7 +85,7 @@ type JMBridge struct {
 	cbzSeriesEnabled  bool
 }
 
-func NewJMBridge(optionPath, fileDir, mangaDir, cbzDir string, timeoutSec int, localTest bool) *JMBridge {
+func NewJMBridge(optionPath, fileDir, mangaDir, cbzDir string, timeoutSec int, localTest bool, proxy string) *JMBridge {
 	if timeoutSec <= 0 {
 		timeoutSec = 1800
 	}
@@ -95,6 +96,16 @@ func NewJMBridge(optionPath, fileDir, mangaDir, cbzDir string, timeoutSec int, l
 		cbzDir = "./cbz/"
 	}
 	jar, _ := cookiejar.New(nil)
+	
+	// 创建HTTP客户端，支持代理
+	transport := &http.Transport{}
+	if proxy != "" {
+		proxyURL, err := url.Parse(proxy)
+		if err == nil {
+			transport.Proxy = http.ProxyURL(proxyURL)
+		}
+	}
+	
 	return &JMBridge{
 		optionPath: optionPath,
 		fileDir:    fileDir,
@@ -102,9 +113,11 @@ func NewJMBridge(optionPath, fileDir, mangaDir, cbzDir string, timeoutSec int, l
 		cbzDir:     cbzDir,
 		timeoutSec: timeoutSec,
 		localTest:  localTest,
+		proxy:      proxy,
 		client: &http.Client{
-			Timeout: 60 * time.Second,
-			Jar:     jar,
+			Timeout:   60 * time.Second,
+			Jar:       jar,
+			Transport: transport,
 		},
 		apiDomains:        append([]string{}, jmDefaultAPIDomains...),
 		imgDomains:        append([]string{}, jmDefaultImageDomains...),

@@ -54,6 +54,7 @@ type Config struct {
 	CBZSeriesEnabled  bool   `yaml:"cbz_series_enabled"`
 	LogDir            string `yaml:"log_dir"`
 	JMOptionPath      string `yaml:"jm_option_path"`
+	JMProxy           string `yaml:"jm_proxy"` // JM下载代理
 	TransferMode      string `yaml:"transfer_mode"`
 	RemoteUser        string `yaml:"remote_user"`
 	RemoteHost        string `yaml:"remote_host"`
@@ -440,7 +441,7 @@ func NewApp(configPath, configExamplePath string) (*App, error) {
 		cfgPath:    configPath,
 		cfg:        cfg,
 		bot:        NewNapcatClient(cfg.WebsocketURL, cfg.WebsocketToken, cfg.LocalTestMode),
-		jm:         NewJMBridge(cfg.JMOptionPath, cfg.FileDir, cfg.MangaDir, cfg.CBZDir, cfg.DownloadTimeout, cfg.LocalTestMode),
+		jm:         NewJMBridge(cfg.JMOptionPath, cfg.FileDir, cfg.MangaDir, cfg.CBZDir, cfg.DownloadTimeout, cfg.LocalTestMode, cfg.JMProxy),
 		queue:      make(chan DownloadTask, 1024),
 		recent:     map[string]map[string]time.Time{},
 		search:     map[string]PendingSearch{},
