@@ -119,6 +119,14 @@ type Config struct {
 	DailyRecommendGroups  []int64 `yaml:"daily_recommend_groups"`
 
 	MaxConcurrentDownloads int `yaml:"max_concurrent_downloads"`
+
+	AIImageEnabled   bool   `yaml:"ai_image_enabled"`
+	AIImageBaseURL   string `yaml:"ai_image_base_url"`
+	AIImageAPIKey    string `yaml:"ai_image_api_key"`
+	AIImageModel     string `yaml:"ai_image_model"`
+	AIImageSize      string `yaml:"ai_image_size"`
+	AIImageTimeout   int    `yaml:"ai_image_timeout_seconds"`
+	AIImageMaxRetries int   `yaml:"ai_image_max_retries"`
 }
 
 type App struct {
@@ -657,6 +665,24 @@ func fillDefaults(cfg *Config) {
 		} else {
 			cfg.CardUserID = 10000
 		}
+	}
+	if cfg.AIImageAPIKey == "" {
+		cfg.AIImageAPIKey = os.Getenv("AI_IMAGE_API_KEY")
+	}
+	if cfg.AIImageBaseURL == "" {
+		cfg.AIImageBaseURL = "https://api.openai.com/v1"
+	}
+	if cfg.AIImageModel == "" {
+		cfg.AIImageModel = "dall-e-3"
+	}
+	if cfg.AIImageSize == "" {
+		cfg.AIImageSize = "1024x1024"
+	}
+	if cfg.AIImageTimeout <= 0 {
+		cfg.AIImageTimeout = 120
+	}
+	if cfg.AIImageMaxRetries <= 0 {
+		cfg.AIImageMaxRetries = 3
 	}
 }
 
@@ -1214,6 +1240,10 @@ func (a *App) handleMessageEvent(data map[string]any) {
 		return
 	}
 	if a.handleAdminClaimCommand(rawMessage, messageType, groupID, userID) {
+		return
+	}
+
+	if a.handleAIImageCommand(rawMessage, data, messageType, groupID, userID) {
 		return
 	}
 
@@ -4270,6 +4300,10 @@ func helpMessage() string {
 		"15) /jm daily add|del <群号>：添加/删除推荐群（管理员）\n" +
 		"16) /jm daily now：立即发送每日推荐（管理员）\n" +
 		"16) /jm help：查看帮助\n\n" +
+		"【AI生图】\n" +
+		"1) image2 <提示词>：AI 文生图\n" +
+		"2) 引用图片后 image2 <提示词>：AI 图生图\n" +
+		"3) /image2 <提示词>：同上\n\n" +
 		"【哔咔漫画】\n" +
 		"1) /bika on|off：启用/关闭哔咔（管理员）\n" +
 		"2) /bika login <邮箱> <密码>：登录哔咔账号\n" +
@@ -4384,6 +4418,14 @@ func NewNapcatClient(url, token string, dryRun bool) *NapcatClient {
 func (c *NapcatClient) SendPrivateMessage(userID int64, message string) bool {
 	_, err := c.send("send_private_msg", map[string]any{"user_id": userID, "message": []map[string]any{{"type": "text", "data": map[string]any{"text": message}}}}, echo("private_text", userID), 10*time.Second)
 	return err == nil
+}
+
+func (c *NapcatClient) GetMsg(messageID int64) (map[string]any, error) {
+	resp, err := c.send("get_msg", map[string]any{"message_id": messageID}, echo("get_msg", messageID), 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	return mapGet(resp, "data"), nil
 }
 
 func (c *NapcatClient) GetImageURL(fileRef string) (string, error) {
@@ -4747,6 +4789,38 @@ func buildMarkdownCard(nickname, message string) string {
 
 func (c *NapcatClient) SendPrivateFile(cfg Config, userID int64, filePath string) bool {
 	return c.sendFile(cfg, "send_private_msg", map[string]any{"user_id": userID}, filePath)
+}
+
+func (c *NapcatClient) SendGroupMsgWithAtAndImage(groupID, userID int64, imageFile string) bool {
+	_, err := c.send("send_group_msg", map[string]any{
+		"group_id": groupID,
+		"message": []map[string]any{
+			{"type": "at", "data": map[string]any{"qq": userID}},
+			{"type": "image", "data": map[string]any{"file": imageFile}},
+		},
+	}, echo("group_img_at", groupID), 60*time.Second)
+	return err == nil
+}
+
+func (c *NapcatClient) SendPrivateMsgWithImage(userID int64, imageFile string) bool {
+	_, err := c.send("send_private_msg", map[string]any{
+		"user_id": userID,
+		"message": []map[string]any{
+			{"type": "image", "data": map[string]any{"file": imageFile}},
+		},
+	}, echo("private_img", userID), 60*time.Second)
+	return err == nil
+}
+
+func (c *NapcatClient) SendGroupMsgWithAtText(groupID, userID int64, text string) bool {
+	_, err := c.send("send_group_msg", map[string]any{
+		"group_id": groupID,
+		"message": []map[string]any{
+			{"type": "at", "data": map[string]any{"qq": userID}},
+			{"type": "text", "data": map[string]any{"text": text}},
+		},
+	}, echo("group_at_txt", groupID), 10*time.Second)
+	return err == nil
 }
 
 func (c *NapcatClient) SendGroupFile(cfg Config, groupID int64, filePath string) bool {
