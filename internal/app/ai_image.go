@@ -42,7 +42,7 @@ func (a *App) handleAIImageCommand(rawMessage string, data map[string]any, messa
 		}
 	}
 
-	m := mustMatch(`^(?:/)?image2\s+(.+)$`, rawMessage)
+	m := mustMatch(`(?:^|])(?:\s*)image2\s+(.+)$`, rawMessage)
 	if m == nil {
 		return false
 	}
@@ -145,6 +145,7 @@ func (a *App) handleAIImageCommand(rawMessage string, data map[string]any, messa
 }
 
 func (a *App) extractAIImageBytes(data map[string]any) ([]byte, error) {
+	// 尝试从回复消息中提取图片
 	replyID := extractReplyMessageID(data)
 	if replyID > 0 {
 		msgData, err := a.bot.GetMsg(replyID)
@@ -165,9 +166,14 @@ func (a *App) extractAIImageBytes(data map[string]any) ([]byte, error) {
 					return downloadImageBytes(u)
 				}
 			}
+			// 尝试从被回复消息的 image 字段直接提取
+			if img, ok := extractImageFromMessage(msgData); ok {
+				return downloadImageBytes(img)
+			}
 		}
 	}
 
+	// 尝试从当前消息中提取图片（image2 与图片在同一消息的情况）
 	sources := extractSoutuImageSourcesFromEvent(data)
 	for _, src := range sources {
 		if src.ImageURL != "" {
@@ -220,4 +226,41 @@ func downloadImageBytes(imageURL string) ([]byte, error) {
 		return nil, fmt.Errorf("download image status %d", resp.StatusCode)
 	}
 	return io.ReadAll(resp.Body)
+}
+
+// extractImageFromMessage 从 NapCat 消息的 records 或 message 字段提取图片 URL
+func extractImageFromMessage(data map[string]any) (string, bool) {
+	// 从 records 数组中提取（被回复消息的图片在这里）
+	if records, ok := data["records"].([]any); ok {
+		for _, rec := range records {
+			if rm, ok := rec.(map[string]any); ok {
+				if url := findImageInElements(rm); url != "" {
+					return url, true
+				}
+			}
+		}
+	}
+	// 从 elements 中提取
+	if url := findImageInElements(data); url != "" {
+		return url, true
+	}
+	return "", false
+}
+
+func findImageInElements(data map[string]any) string {
+	elems, ok := data["elements"].([]any)
+	if !ok {
+		return ""
+	}
+	for _, e := range elems {
+		m, ok := e.(map[string]any)
+		if !ok || toString(m["type"]) != "image" {
+			continue
+		}
+		d := mapGet(m, "data")
+		if u := toString(d["url"]); u != "" {
+			return u
+		}
+	}
+	return ""
 }
