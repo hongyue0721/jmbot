@@ -32,22 +32,38 @@
 ## 2. 核心能力
 
 ### 2.1 命令能力
+**基础命令：**
 - `/jm <ID>`：下载并发送
 - `/jm look <ID>`：查看本子信息
 - `/jm search <关键词>`：搜索本子（聚合搜索哔咔+JM）
+- `搜索 <关键词>`：同上
 - `/jm search` / `识图` / `/jm识图`：进入识图窗口（默认 120 秒）
-- `/jm goodluck`：随机本子
-- `/jm mode pdf|zip`：发送格式
-- `/jm enc on|off`、`/jm passwd <密码>`、`/jm randpwd on|off`
-- `/jm fname jm|full|current`：文件命名（`current`=保持旧规则）
-- `/jm regex on|off`：正则提取模式
-- `/jm strict on|off`：严格模式（只处理/jm开头的消息）
-- `/jm daily on|off|now`：每日推荐
+- `/jm goodluck` / `/goodluck` / `随机本子`：随机本子
 - `/jm help`：查看帮助
 
 **确认下载**：
 - `确认 1` 或 `1` - 下载第1个结果
 - `确认 1 2 3` 或 `1 2 3` - 批量下载
+
+**用户设置：**
+- `/jm mode pdf|zip`：发送格式
+- `/jm enc on|off`：加密开关
+- `/jm passwd <密码>`：设置加密密码
+- `/jm randpwd on|off`：随机密码加密
+- `/jm fname jm|full|current`：文件命名方式
+- `/jm regex on|off`：正则提取模式
+- `/jm strict on|off`：严格模式（只处理/jm开头的消息）
+
+**管理员命令：**
+- `/jm admin`：私聊认领管理员
+- `/jm on|off`：启用/禁用当前群
+- `/jm addban <ID>`：封禁本子ID
+- `/jm delban <ID>`：解封本子ID
+- `/jm setmax <数字>`：设置章节数阈值
+- `/jm cfg list|show|set`：在线配置管理
+- `/jm dedup show|set|clear`：重复请求冷却管理
+- `/jm daily on|off|now`：每日推荐开关/立即发送
+- `/jm daily add|del <群号>`：管理推荐群
 
 ### 2.2 严格模式
 开启后只处理以 `/jm` 开头的消息，避免普通聊天触发本子下载：
