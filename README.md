@@ -13,7 +13,8 @@
 ```text
 .
 ├── cmd/napcat-jm-go/        # 标准 Go 入口
-├── internal/app/            # 核心实现（HTTP事件、命令、下载、识图、发送）
+├── internal/app/            # 核心实现（HTTP事件、命令、下载、识图、发送、AI画图）
+├── internal/aiimage/        # AI 画图 OpenAI 兼容 API 客户端
 ├── configs/
 │   ├── config.example.yml   # 示例配置
 │   └── option.yml           # jmcomic 配置
@@ -62,9 +63,18 @@
 
 ### 2.3 识图联动
 - 识图成功后，会自动提取标题关键词（含中日文片段）并走 `/jm search` 同款检索逻辑
-- 命中后自动写入待确认队列，回复“确认”即可下载
+- 命中后自动写入待确认队列，回复"确认"即可下载
 
-### 2.3 发送策略
+### 2.4 AI 画图
+- `image on`：开启 AI 画图（管理员）
+- `image off`：关闭 AI 画图
+- `image2 <提示词>`：生成图片
+- **图生图**：回复带图片的消息发送 `image2 <提示词>`，可将回复的图片作为参考图
+- 失败自动重试最多 3 次
+- 配置项：`ai_image_enabled`、`ai_image_api_key`、`ai_image_base_url`、`ai_image_model`、`ai_image_size`、`ai_image_timeout`、`ai_image_max_retries`
+- API Key 支持 `AI_IMAGE_API_KEY` 环境变量回退，避免写入配置文件
+
+### 2.5 发送策略
 - 普通消息默认纯文本
 - 批量任务通知可按 `reply_as_card` 使用转发卡片（仅批量场景）
 
@@ -163,6 +173,16 @@ docker compose down
 - `./manga -> /app/manga`
 - `./cbz -> /app/cbz`
 - `./logs -> /app/logs`
+
+**AI 画图配置**：
+- `ai_image_enabled`：是否启用 AI 画图（默认 `false`，管理员发送 `image on` 后自动激活）
+- `ai_image_api_key`：API 密钥（建议使用环境变量 `AI_IMAGE_API_KEY`）
+- `ai_image_base_url`：OpenAI 兼容 API 地址（默认 `http://47.104.6.123:3000/v1`）
+- `ai_image_model`：模型名称（默认 `gpt-image-2`）
+- `ai_image_size`：图片尺寸（默认 `1024x1024`）
+- `ai_image_timeout`：请求超时秒数（默认 `300`，5 分钟）
+- `ai_image_max_retries`：失败重试次数（默认 `3`）
+- `ai_image_waiting_image`：等待时发送的图片（URL 或 `base64://`，空则不发送）
 
 ## 5. NapCat 配置（必须）
 
@@ -300,3 +320,63 @@ kill <pid>
 - `enc_password_*` 建议使用强密码并定期轮换
 - 生产建议用 `systemd` + 外置 bypass API
 - 主端口建议固定（`http_port_fallback: false`），避免 NapCat 回调漂移
+
+## 11. 更新日志
+
+### 2026-05-20 v3 — 错误信息优化与参数调整
+
+- **已推送至 `hongyue0721/jmbot` 和 `zuichen123/jmbot` 的 `image` 分支**（PR #7）
+- 失败时不再暴露详细 API 错误，改为显示 `<提示词> 图片生成失败`（详情写入服务端日志）
+- 默认超时改为 `300s`（5 分钟），默认重试次数改为 `2` 次
+- 等待图片改用动画 GIF（Wikipedia ajax-loader），替换原来的 PNG 旋转 spinner
+- 默认等待图通过 `base64://` 直接内嵌，无需额外网络请求
+
+### 2026-05-20 v2 — 新增 AI 画图插件
+
+以同进程插件方式集成 AI 图像生成，不修改 JM/哔咔/下载/识图等核心逻辑。
+
+**新增指令**
+
+| 指令 | 说明 | 权限 |
+|------|------|------|
+| `image on` | 开启 AI 画图功能 | 管理员 |
+| `image off` | 关闭 AI 画图功能 | 管理员 |
+| `image2 <提示词>` | 根据文字生成图片 | 所有人 |
+| 回复图片 + `image2 <提示词>` | 以回复的图片为参考进行图生图 | 所有人 |
+
+**功能说明**
+- 图生图：引用带图片的消息发送 `image2 <提示词>`，自动提取引用图片作为参考，调用 `/v1/images/edits` 端点
+- 若模型不支持图生图（如 `gpt-image-2`），自动降级为文生图并提示用户
+- 失败自动重试（默认 3 次），错误信息从 API 响应体中提取而非仅返回状态码
+- 提取引用图片时先查 `url`/`base64`，若无则通过 `get_image` 解析 `file` UUID
+- 生成时先发送等待图片（四色旋转 spinner），结果生成后发送最终图片
+- 引用图片提取失败写日志，不再静默降级
+
+**新增配置项**
+
+```yaml
+ai_image_enabled: false              # 是否启用 AI 画图
+ai_image_base_url: "https://api.openai.com/v1"  # API 地址
+ai_image_api_key: ""                 # API Key（也可通过环境变量 AI_IMAGE_API_KEY 设置）
+ai_image_model: "dall-e-3"           # 模型名
+ai_image_size: "1024x1024"           # 图片尺寸
+ai_image_timeout_seconds: 300        # 请求超时（秒），默认 5 分钟
+ai_image_max_retries: 3              # 失败重试次数
+ai_image_waiting_image: ""           # 等待图片（URL 或 base64://，空则使用默认 spinner）
+```
+
+**新增文件**
+- `internal/aiimage/aiimage.go` — OpenAI 兼容 API 客户端（文生图/图生图/重试/错误提取）
+- `internal/app/ai_image.go` — App 命令处理层（消息解析/图片提取/结果发送）
+
+**修改文件**
+- `internal/app/main.go` — Config 新增 7 个字段 + fillDefaults + SendGroupImage + GetMsg/SendGroupMsgWithAtAndImage/SendPrivateMsgWithImage/SendGroupMsgWithAtText
+- `configs/config.example.yml` — AI 画图配置示例
+- `README.md` — 本更新日志
+
+### 2026-05-20 v1 — 修复引用图生图
+
+- 修复 `extractAIImageBytes` 对回复消息缺少 `file` ref 回退的问题，补充 `extractSoutuImageFileRefsFromEvent` 路径
+- API 错误不再只返回状态码，改为从响应体提取 `error.message`
+- 提取失败不再静默忽略，写日志记录
+- 新增 `ai_image_waiting_image` 支持生成等待图
