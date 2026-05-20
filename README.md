@@ -13,7 +13,8 @@
 ```text
 .
 ├── cmd/napcat-jm-go/        # 标准 Go 入口
-├── internal/app/            # 核心实现（HTTP事件、命令、下载、识图、发送）
+├── internal/app/            # 核心实现（HTTP事件、命令、下载、识图、发送、AI画图）
+├── internal/aiimage/        # AI 画图 OpenAI 兼容 API 客户端
 ├── configs/
 │   ├── config.example.yml   # 示例配置
 │   └── option.yml           # jmcomic 配置
@@ -113,7 +114,16 @@
 - 识图成功后，会自动提取标题关键词（含中日文片段）并走 `/jm search` 同款检索逻辑
 - 命中后自动写入待确认队列，回复"确认"即可下载
 
-### 2.7 发送策略
+### 2.7 AI 画图
+- `image on`：开启 AI 画图（管理员）
+- `image off`：关闭 AI 画图
+- `image2 <提示词>`：生成图片
+- **图生图**：回复带图片的消息发送 `image2 <提示词>`，可将回复的图片作为参考图
+- 失败自动重试最多 3 次
+- 配置项：`ai_image_enabled`、`ai_image_api_key`、`ai_image_base_url`、`ai_image_model`、`ai_image_size`、`ai_image_timeout`、`ai_image_max_retries`
+- API Key 支持 `AI_IMAGE_API_KEY` 环境变量回退，避免写入配置文件
+
+### 2.8 发送策略
 - 本子以转发卡片形式发送（信息+封面+文件）
 - 文件通过QQ正式上传，聊天记录中可永久打开
 - CBZ文件本地保留，PDF发送后延迟24小时删除
@@ -225,6 +235,15 @@ docker compose down
 - `./manga -> /app/manga`
 - `./cbz -> /app/cbz`
 - `./logs -> /app/logs`
+
+**AI 画图配置**：
+- `ai_image_enabled`：是否启用 AI 画图（默认 `false`，管理员发送 `image on` 后自动激活）
+- `ai_image_api_key`：API 密钥（建议使用环境变量 `AI_IMAGE_API_KEY`）
+- `ai_image_base_url`：OpenAI 兼容 API 地址（默认 `http://47.104.6.123:3000/v1`）
+- `ai_image_model`：模型名称（默认 `gpt-image-2`）
+- `ai_image_size`：图片尺寸（默认 `1024x1024`）
+- `ai_image_timeout`：请求超时秒数（默认 `120`）
+- `ai_image_max_retries`：失败重试次数（默认 `3`）
 
 ## 5. NapCat 配置（必须）
 
