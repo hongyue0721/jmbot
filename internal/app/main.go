@@ -102,6 +102,7 @@ type Config struct {
 	BannedID    []string `yaml:"banned_id"`
 	BannedUser  []string `yaml:"banned_user"`
 	BannedGroup []string `yaml:"banned_group"`
+	AllowedGroup []int64 `yaml:"allowed_group"` // 白名单群聊，为空时所有群生效
 
 	ReplyAsCard  bool   `yaml:"reply_as_card"`
 	CardNickname string `yaml:"card_nickname"`
@@ -1422,6 +1423,47 @@ func (a *App) handleMessageEvent(data map[string]any) {
 		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("章节数阈值已设为 %d", n))
 		return
 	}
+	if m := mustMatch(`^/jm\s+allow\s+add\s+(\d+)$`, rawMessage); m != nil {
+		if !a.requireAdmin(messageType, groupID, userID, "仅管理员可操作") {
+			return
+		}
+		gid, _ := strconv.ParseInt(m[1], 10, 64)
+		a.cfgMu.Lock()
+		if !containsInt64(a.cfg.AllowedGroup, gid) {
+			a.cfg.AllowedGroup = append(a.cfg.AllowedGroup, gid)
+		}
+		a.cfgMu.Unlock()
+		a.saveConfig()
+		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("已添加白名单群：%d", gid))
+		return
+	}
+	if m := mustMatch(`^/jm\s+allow\s+del\s+(\d+)$`, rawMessage); m != nil {
+		if !a.requireAdmin(messageType, groupID, userID, "仅管理员可操作") {
+			return
+		}
+		gid, _ := strconv.ParseInt(m[1], 10, 64)
+		a.cfgMu.Lock()
+		a.cfg.AllowedGroup = removeInt64(a.cfg.AllowedGroup, gid)
+		a.cfgMu.Unlock()
+		a.saveConfig()
+		a.sendMessage(messageType, groupID, userID, fmt.Sprintf("已移除白名单群：%d", gid))
+		return
+	}
+	if matched(`^/jm\s+allow\s+list$`, rawMessage) {
+		a.cfgMu.RLock()
+		groups := a.cfg.AllowedGroup
+		a.cfgMu.RUnlock()
+		if len(groups) == 0 {
+			a.sendMessage(messageType, groupID, userID, "白名单为空，所有群均可使用")
+		} else {
+			var ids []string
+			for _, g := range groups {
+				ids = append(ids, strconv.FormatInt(g, 10))
+			}
+			a.sendMessage(messageType, groupID, userID, "白名单群："+strings.Join(ids, ", "))
+		}
+		return
+	}
 	if matched(`^/jm\s+daily\s+on$`, rawMessage) {
 		if !a.requireAdmin(messageType, groupID, userID, "仅管理员可操作") {
 			return
@@ -2196,14 +2238,30 @@ func (a *App) clearRecentRequest(number string) int {
 func (a *App) isJMAllowed(messageType string, groupID, userID int64) bool {
 	a.cfgMu.RLock()
 	defer a.cfgMu.RUnlock()
-	if messageType == "group" && contains(a.cfg.BannedGroup, strconv.FormatInt(groupID, 10)) {
-		a.sendMessage(messageType, groupID, userID, "禁漫功能未开启")
+
+	// 私聊始终允许
+	if messageType != "group" {
+		return true
+	}
+
+	// 检查黑名单群
+	if contains(a.cfg.BannedGroup, strconv.FormatInt(groupID, 10)) {
+		a.sendMessage(messageType, groupID, userID, "该群已被禁止使用")
 		return false
 	}
+
+	// 检查白名单（如果设置了白名单，只允许白名单中的群）
+	if len(a.cfg.AllowedGroup) > 0 && !containsInt64(a.cfg.AllowedGroup, groupID) {
+		a.sendMessage(messageType, groupID, userID, "该群未在白名单中")
+		return false
+	}
+
+	// 检查黑名单用户
 	if contains(a.cfg.BannedUser, strconv.FormatInt(userID, 10)) {
 		a.sendMessage(messageType, groupID, userID, "禁止下载或用户被封禁")
 		return false
 	}
+
 	return true
 }
 
@@ -4310,6 +4368,8 @@ func helpMessage() string {
 		"12) /jm strict on|off：设置严格模式（只处理/jm开头的消息）\n" +
 		"12) /jm dedup show|set|clear：重复请求冷却管理（管理员）\n" +
 		"13) /jm cfg list|show|set：在线配置开关（管理员）\n" +
+		"14) /jm allow add|del <群号>：管理白名单群（管理员）\n" +
+		"15) /jm allow list：查看白名单群（管理员）\n" +
 		"14) /jm daily on|off：启用/关闭每日本子推荐（管理员）\n" +
 		"15) /jm daily add|del <群号>：添加/删除推荐群（管理员）\n" +
 		"16) /jm daily now：立即发送每日推荐（管理员）\n" +
