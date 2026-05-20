@@ -320,3 +320,44 @@ kill <pid>
 - `enc_password_*` 建议使用强密码并定期轮换
 - 生产建议用 `systemd` + 外置 bypass API
 - 主端口建议固定（`http_port_fallback: false`），避免 NapCat 回调漂移
+
+## 11. AI 画图功能
+
+本插件支持通过 OpenAI 兼容 API 进行 AI 图像生成，以同进程插件方式集成，不修改 JM/哔咔/下载/识图等核心逻辑。
+
+### 指令
+
+| 指令 | 说明 | 权限 |
+|------|------|------|
+| `image on` | 开启 AI 画图功能 | 管理员 |
+| `image off` | 关闭 AI 画图功能 | 管理员 |
+| `image2 <提示词>` | 根据文字生成图片 | 所有人 |
+| 回复图片 + `image2 <提示词>` | 以回复的图片为参考进行图生图 | 所有人 |
+
+### 图生图说明
+
+引用带图片的消息发送 `image2 <提示词>`，将自动提取引用的图片作为参考图，调用 API 的 `/v1/images/edits` 端点进行图生图。
+
+若当前模型不支持图生图（如 `gpt-image-2`），会自动降级为文生图，并提示用户。
+
+### 配置项
+
+```yaml
+ai_image_enabled: false              # 是否启用 AI 画图
+ai_image_base_url: "https://api.openai.com/v1"  # API 地址
+ai_image_api_key: ""                 # API Key（也可通过环境变量 AI_IMAGE_API_KEY 设置）
+ai_image_model: "dall-e-3"           # 模型名
+ai_image_size: "1024x1024"           # 图片尺寸
+ai_image_timeout_seconds: 300        # 请求超时（秒），默认 5 分钟
+ai_image_max_retries: 3              # 失败重试次数
+ai_image_waiting_image: ""           # 等待时发送的图片（URL 或 base64://，空则使用默认 spinner）
+```
+
+### 技术实现
+
+- `internal/aiimage/`：独立 API 客户端包，封装 `GenerateImage`（文生图）和 `EditImage`（图生图），支持重试和错误提取
+- `internal/app/ai_image.go`：App 级命令处理层，负责消息解析、图片提取、结果发送
+- `image on/off` 状态持久化到 `config.yml`，重启后保留
+- API Key 支持环境变量 `AI_IMAGE_API_KEY` 回退，避免写入配置文件
+- 生成时先发送等待图片（默认四色旋转 spinner），结果生成后发送最终图片
+- 图片提取优先级：引用消息图片 > 当前消息图片 > 纯文生图
