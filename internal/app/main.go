@@ -157,7 +157,7 @@ type PendingSearch struct {
 }
 
 type SearchResultItem struct {
-	Source string   // "JM" 或 "Bika"
+	Source string // "JM" 或 "Bika"
 	ID     string
 	Title  string
 	Author string
@@ -1526,9 +1526,9 @@ func (a *App) handleMessageEvent(data map[string]any) {
 		// 缓存搜索结果
 		a.searchMu.Lock()
 		a.search[scope] = PendingSearch{
-			AlbumID:  "",
-			Title:    "",
-			At:       time.Now(),
+			AlbumID:    "",
+			Title:      "",
+			At:         time.Now(),
 			AggResults: allResults,
 		}
 		a.searchMu.Unlock()
@@ -2712,111 +2712,100 @@ func (a *App) notifyAdminSendFailure(groupID int64, jmNumber, title, filePath st
 	}
 	now := time.Now().Format("2006-01-02 15:04:05")
 	fileName := filepath.Base(filePath)
- fileSize := fileSizeMB(filePath)
+	fileSize := fileSizeMB(filePath)
 	msg := fmt.Sprintf("【发送失败通知】\n群号: %d\n本子号: %s\n本子名: %s\n文件名: %s\n文件大小: %.2fMB\n时间: %s",
 		groupID, jmNumber, title, fileName, fileSize, now)
 	_ = a.bot.SendPrivateMessage(adminID, msg)
 }
 
-// sendComicForwardMessage 发送包含基本信息、封面和文件的转发消息
+// sendComicForwardMessage keeps the visible chat compact by sending metadata,
+// cover and preview link as a merged forward card, then uploads the comic as a
+// real QQ file. Comic files inside merged forwards can point to transient NapCat
+// paths and become unopenable in chat history.
 func (a *App) sendComicForwardMessage(messageType string, groupID, userID int64, infoMsg, coverPath, filePath string, cfg Config) bool {
+	if filePath == "" || !fileExists(filePath) {
+		return false
+	}
+	a.sendComicInfoForwardMessage(messageType, groupID, userID, infoMsg, coverPath, cfg)
+	if messageType == "group" && groupID > 0 {
+		return a.bot.SendGroupFile(cfg, groupID, filePath)
+	}
+	if messageType == "private" && userID > 0 {
+		return a.bot.SendPrivateFile(cfg, userID, filePath)
+	}
+	return false
+}
+
+func (a *App) sendComicInfoForwardMessage(messageType string, groupID, userID int64, infoMsg, coverPath string, cfg Config) bool {
 	senderID := cfg.CardUserID
 	nickname := cfg.CardNickname
 	if senderID <= 0 {
 		senderID = 10000
 	}
-	if nickname == "" {
+	if strings.TrimSpace(nickname) == "" {
 		nickname = "文件助手"
 	}
 
-	// 准备文件
-	coverPrepared := false
-	filePrepared := false
+	previewURL := ""
+	if m := regexp.MustCompile(`车牌号：\s*(\d+)`).FindStringSubmatch(infoMsg); len(m) > 1 {
+		previewURL = a.previewPublicURL(m[1])
+	}
+	text := strings.TrimSpace(infoMsg)
+	if previewURL != "" {
+		text += "\n在线预览/下载：" + previewURL
+	}
+	if text == "" {
+		text = "文件信息"
+	}
 
-	nodes := make([]map[string]any, 0, 3)
-
-	// 第一个节点：基本信息
-	nodes = append(nodes, map[string]any{
+	nodes := []map[string]any{{
 		"type": "node",
 		"data": map[string]any{
 			"user_id":  senderID,
 			"nickname": nickname,
-			"content": []map[string]any{
-				{"type": "text", "data": map[string]any{"text": infoMsg}},
-			},
+			"content":  []map[string]any{{"type": "text", "data": map[string]any{"text": text}}},
 		},
-	})
+	}}
 
-	// 第二个节点：封面图片
 	if coverPath != "" && fileExists(coverPath) {
 		if pf, err := a.bot.prepareForwardFile(cfg, coverPath); err == nil && len(pf.candidates) > 0 {
-			coverPrepared = true
+			if pf.cleanup != nil {
+				defer pf.cleanup()
+			}
 			nodes = append(nodes, map[string]any{
 				"type": "node",
 				"data": map[string]any{
 					"user_id":  senderID,
 					"nickname": nickname,
-					"content": []map[string]any{
-						{"type": "file", "data": map[string]any{"file": pf.candidates[0]}},
-					},
+					"content":  []map[string]any{{"type": "image", "data": map[string]any{"file": pf.candidates[0]}}},
 				},
 			})
 		}
 	}
-	if !coverPrepared {
-		nodes = append(nodes, map[string]any{
-			"type": "node",
-			"data": map[string]any{
-				"user_id":  senderID,
-				"nickname": nickname,
-				"content": []map[string]any{
-					{"type": "text", "data": map[string]any{"text": "（封面预览不可用）"}},
-				},
-			},
-		})
-	}
 
-	// 第三个节点：文件
-	if filePath != "" && fileExists(filePath) {
-		if pf, err := a.bot.prepareForwardFile(cfg, filePath); err == nil && len(pf.candidates) > 0 {
-			filePrepared = true
-			nodes = append(nodes, map[string]any{
-				"type": "node",
-				"data": map[string]any{
-					"user_id":  senderID,
-					"nickname": nickname,
-					"content": []map[string]any{
-						{"type": "file", "data": map[string]any{"file": pf.candidates[0]}},
-					},
-				},
-			})
-		}
-	}
-	if !filePrepared {
-		return false
-	}
-
-	// 发送转发消息，重试3次
 	var action string
 	var baseParams map[string]any
-	if messageType == "group" {
+	if messageType == "group" && groupID > 0 {
 		action = "send_group_forward_msg"
 		baseParams = map[string]any{"group_id": groupID}
-	} else {
+	} else if messageType == "private" && userID > 0 {
 		action = "send_private_forward_msg"
 		baseParams = map[string]any{"user_id": userID}
+	} else {
+		return false
 	}
 
 	for retry := 0; retry < 3; retry++ {
 		params := copyMap(baseParams)
 		params["message"] = nodes
-		_, err := a.bot.send(action, params, echo("forward_comic", groupID), 600*time.Second)
+		_, err := a.bot.send(action, params, echo("forward_comic_info", groupID), 60*time.Second)
 		if err == nil {
 			return true
 		}
-		log.Printf("[Forward] 发送失败 (重试%d/3): %v", retry+1, err)
-		time.Sleep(3 * time.Second)
+		log.Printf("[ForwardInfo] 发送失败 (重试%d/3): %v", retry+1, err)
+		time.Sleep(2 * time.Second)
 	}
+	a.sendMessage(messageType, groupID, userID, text)
 	return false
 }
 
@@ -4775,10 +4764,10 @@ func (c *NapcatClient) sendFile(cfg Config, action string, baseParams map[string
 			streamPath,
 			"file://" + streamPath,
 		}
-		if ok, _ := c.tryPrimarySendRefs(action, baseParams, streamRefs); ok {
+		if c.tryUploadFileFallback(action, baseParams, streamRefs, filepath.Base(filePath)) {
 			return true
 		}
-		if c.tryUploadFileFallback(action, baseParams, streamRefs, filepath.Base(filePath)) {
+		if ok, _ := c.tryPrimarySendRefs(action, baseParams, streamRefs); ok {
 			return true
 		}
 		log.Printf("stream upload completed but send still failed, fallback to staged path")
@@ -4800,11 +4789,11 @@ func (c *NapcatClient) sendFile(cfg Config, action string, baseParams map[string
 		"file://" + dockerPath,
 	}
 
-	ok, lastErr := c.tryPrimarySendRefs(action, baseParams, fileRefs)
-	if ok {
+	if c.tryUploadFileFallback(action, baseParams, fileRefs, filepath.Base(filePath)) {
 		return true
 	}
-	if c.tryUploadFileFallback(action, baseParams, fileRefs, filepath.Base(filePath)) {
+	ok, lastErr := c.tryPrimarySendRefs(action, baseParams, fileRefs)
+	if ok {
 		return true
 	}
 	log.Printf("send file failed: %v", lastErr)
