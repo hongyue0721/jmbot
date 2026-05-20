@@ -4300,10 +4300,12 @@ func helpMessage() string {
 		"15) /jm daily add|del <群号>：添加/删除推荐群（管理员）\n" +
 		"16) /jm daily now：立即发送每日推荐（管理员）\n" +
 		"16) /jm help：查看帮助\n\n" +
-		"【AI生图】\n" +
-		"1) image2 <提示词>：AI 文生图\n" +
-		"2) 引用图片后 image2 <提示词>：AI 图生图\n" +
-		"3) /image2 <提示词>：同上\n\n" +
+		"【AI画图】\n" +
+		"1) image on：开启画图功能（管理员）\n" +
+		"2) image off：关闭画图功能（管理员）\n" +
+		"3) image2 <提示词>：AI 文生图\n" +
+		"4) 引用图片后 image2 <提示词>：AI 图生图\n" +
+		"5) /image2 <提示词>：同上\n\n" +
 		"【哔咔漫画】\n" +
 		"1) /bika on|off：启用/关闭哔咔（管理员）\n" +
 		"2) /bika login <邮箱> <密码>：登录哔咔账号\n" +

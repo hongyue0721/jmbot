@@ -12,6 +12,35 @@ import (
 )
 
 func (a *App) handleAIImageCommand(rawMessage string, data map[string]any, messageType string, groupID, userID int64) bool {
+	// image on / off / help
+	if m := mustMatch(`^(?:/)?image\s+(on|off|help)$`, rawMessage); m != nil {
+		switch m[1] {
+		case "on":
+			if !a.requireAdmin(messageType, groupID, userID, "仅管理员可开启 AI 画图") {
+				return true
+			}
+			a.cfgMu.Lock()
+			a.cfg.AIImageEnabled = true
+			a.cfgMu.Unlock()
+			a.saveConfig()
+			a.sendMessage(messageType, groupID, userID, "AI 画图功能已开启，使用 image2 <提示词> 生成图片")
+			return true
+		case "off":
+			if !a.requireAdmin(messageType, groupID, userID, "仅管理员可关闭 AI 画图") {
+				return true
+			}
+			a.cfgMu.Lock()
+			a.cfg.AIImageEnabled = false
+			a.cfgMu.Unlock()
+			a.saveConfig()
+			a.sendMessage(messageType, groupID, userID, "AI 画图功能已关闭")
+			return true
+		case "help":
+			a.sendMessage(messageType, groupID, userID, "AI 画图使用说明：\n1) image on - 开启画图功能\n2) image off - 关闭画图功能\n3) image2 <提示词> - 生成图片\n4) 引用图片后 image2 <提示词> - 图生图")
+			return true
+		}
+	}
+
 	m := mustMatch(`^(?:/)?image2\s+(.+)$`, rawMessage)
 	if m == nil {
 		return false
@@ -23,11 +52,11 @@ func (a *App) handleAIImageCommand(rawMessage string, data map[string]any, messa
 
 	cfg := a.currentConfig()
 	if !cfg.AIImageEnabled {
-		a.sendMessage(messageType, groupID, userID, "AI 生图功能未启用")
+		a.sendMessage(messageType, groupID, userID, "AI 画图功能未开启，请发送 image on 开启")
 		return true
 	}
 	if cfg.AIImageAPIKey == "" {
-		a.sendMessage(messageType, groupID, userID, "AI 生图未配置 API Key")
+		a.sendMessage(messageType, groupID, userID, "AI 画图未配置 API Key（请联系管理员设置 ai_image_api_key）")
 		return true
 	}
 
@@ -67,7 +96,7 @@ func (a *App) handleAIImageCommand(rawMessage string, data map[string]any, messa
 		imageRef = "base64://" + result.B64JSON
 	}
 	if imageRef == "" {
-		msg := "AI 生图返回为空"
+		msg := "AI 画图返回为空"
 		if messageType == "group" && groupID > 0 {
 			a.bot.SendGroupMsgWithAtText(groupID, userID, msg)
 		} else {
